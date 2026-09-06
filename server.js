@@ -7,6 +7,24 @@ if (process.env.NODE_ENV !== 'production') {
 }
 console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
 console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
+// Debug: Check what environment variables are actually available
+console.log('=== ENVIRONMENT VARIABLES CHECK ===');
+console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
+console.log('JWT_SECRET exists:', !!process.env.JWT_SECRET);
+console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+
+// Print first 50 chars of each (don't expose full values)
+if (process.env.DATABASE_URL) {
+  console.log(
+    'DATABASE_URL starts with:',
+    process.env.DATABASE_URL.substring(0, 50),
+  );
+}
+if (process.env.JWT_SECRET) {
+  console.log('JWT_SECRET length:', process.env.JWT_SECRET.length);
+}
+console.log('====================================');
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
