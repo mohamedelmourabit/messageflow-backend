@@ -1,33 +1,36 @@
 // ============================================
 // MESSAGEFLOW BACKEND - COMPLETE SERVER
 // ============================================
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  'jwt-fallback-secret-12345678901234567890-change-in-production';
+// Load dotenv FIRST (before anything else)
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
-console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
-console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
-// Debug: Check what environment variables are actually available
+
+// NOW define JWT_SECRET (after dotenv loaded)
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  'jwt-fallback-secret-12345678901234567890-change-in-production';
+
+// THEN do debugging logs
 console.log('=== ENVIRONMENT VARIABLES CHECK ===');
 console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
 console.log('JWT_SECRET exists:', !!process.env.JWT_SECRET);
 console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
 console.log('NODE_ENV:', process.env.NODE_ENV);
-
-// Print first 50 chars of each (don't expose full values)
 if (process.env.DATABASE_URL) {
   console.log(
     'DATABASE_URL starts with:',
     process.env.DATABASE_URL.substring(0, 50),
   );
 }
-if (process.env.JWT_SECRET) {
-  console.log('JWT_SECRET length:', process.env.JWT_SECRET.length);
-}
 console.log('====================================');
+
+// THEN require other modules
 const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
@@ -238,9 +241,7 @@ app.post('/auth/signup', async (req, res) => {
     console.log('6. User created in DB');
 
     const userId = result.rows[0].id;
-    const token = jwt.sign({ id: userId }, process.env.JWT_SECRET, {
-      expiresIn: '7d',
-    });
+    const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '7d' });
     console.log('7. JWT token created');
 
     res.json({
