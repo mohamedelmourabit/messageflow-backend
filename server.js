@@ -12,9 +12,18 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? require('stripe')(process.env.STRIPE_SECRET_KEY)
-  : null;
+let stripe;
+try {
+  if (process.env.STRIPE_SECRET_KEY) {
+    stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  } else {
+    console.error('⚠️ WARNING: STRIPE_SECRET_KEY not set!');
+    stripe = null;
+  }
+} catch (err) {
+  console.error('Stripe initialization error:', err.message);
+  stripe = null;
+}
 const twilio = require('twilio');
 
 // ============================================
