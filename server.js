@@ -164,6 +164,9 @@ app.get('/health', (req, res) => {
 
 // SIGNUP
 app.post('/auth/signup', async (req, res) => {
+  console.log('Signup attempt:', req.body);
+  console.log('Stripe:', !!stripe);
+  console.log('DATABASE_URL:', !!process.env.DATABASE_URL);
   const { email, password, businessName, businessType, whatsappNumber } =
     req.body;
 
