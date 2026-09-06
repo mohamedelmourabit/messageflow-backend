@@ -164,30 +164,33 @@ app.get('/health', (req, res) => {
 
 // SIGNUP
 app.post('/auth/signup', async (req, res) => {
-  console.log('Signup attempt:', req.body);
-  console.log('Stripe:', !!stripe);
-  console.log('DATABASE_URL:', !!process.env.DATABASE_URL);
   const { email, password, businessName, businessType, whatsappNumber } =
     req.body;
 
   try {
+    console.log('1. Received data:', { email, businessName });
+
     // Validate input
     if (!email || !password || !businessName) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
+    console.log('2. Data validated');
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
+    console.log('3. Password hashed');
 
     // Create Stripe customer
     const customer = await stripe.customers.create({
       email,
       metadata: { businessName, businessType },
     });
+    console.log('4. Stripe customer created:', customer.id);
 
-    // Calculate trial end date (30 days)
+    // Calculate trial end date
     const trialEndDate = new Date();
     trialEndDate.setDate(trialEndDate.getDate() + 30);
+    console.log('5. Trial date calculated');
 
     // Create user
     const result = await pool.query(
@@ -206,21 +209,22 @@ app.post('/auth/signup', async (req, res) => {
         trialEndDate,
       ],
     );
+    console.log('6. User created in DB');
 
     const userId = result.rows[0].id;
-
-    // Create JWT token
     const token = jwt.sign({ id: userId }, process.env.JWT_SECRET, {
       expiresIn: '7d',
     });
+    console.log('7. JWT token created');
 
     res.json({
       token,
       user: result.rows[0],
-      message: '✅ Account created! 30-day free trial activated',
+      message: '✅ Account created!',
     });
   } catch (err) {
-    console.error('Signup error:', err.message);
+    console.error('❌ Signup error at step:', err.message);
+    console.error('Full error:', err);
     res.status(400).json({ error: err.message });
   }
 });
