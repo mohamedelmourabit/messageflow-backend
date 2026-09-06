@@ -5,12 +5,16 @@
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
+console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
+console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? require('stripe')(process.env.STRIPE_SECRET_KEY)
+  : null;
 const twilio = require('twilio');
 
 // ============================================
