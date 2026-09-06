@@ -1,7 +1,9 @@
 // ============================================
 // MESSAGEFLOW BACKEND - COMPLETE SERVER
 // ============================================
-
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  'jwt-fallback-secret-12345678901234567890-change-in-production';
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
