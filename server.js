@@ -57,7 +57,7 @@ app.use(cors());
 // Database connection
 const dbUrl =
   process.env.DATABASE_URL ||
-  'postgresql://postgres.oujbkosgxqxecsmrdwjo:4r4espTPnbFACW5l@aws-0-eu-west-1.pooler.supabase.com:6543/postgres';
+  'postgresql://postgres.oujbkosgxgxecsmrdwjo:4r4espTPnbFACW5l@aws-1-eu-west-1.pooler.supabase.com:5432/postgres';
 
 const pool = new Pool({
   connectionString: dbUrl,
