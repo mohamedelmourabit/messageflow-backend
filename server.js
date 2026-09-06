@@ -55,9 +55,15 @@ app.use(express.json());
 app.use(cors());
 
 // Database connection
+const dbUrl =
+  process.env.DATABASE_URL ||
+  'postgresql://postgres.oujbkosgxqxecsmrdwjo:4r4espTPnbFACW5l@aws-0-eu-west-1.pooler.supabase.com:6543/postgres';
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: dbUrl,
 });
+
+console.log('🔍 Database URL:', dbUrl.substring(0, 50) + '...');
 
 // Twilio client
 const twilioClient = twilio(
