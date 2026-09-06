@@ -1,17 +1,32 @@
 // ============================================
 // MESSAGEFLOW BACKEND - COMPLETE SERVER
 // ============================================
-// Load dotenv FIRST (before anything else)
+
+// STEP 1: Load dotenv FIRST
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
 
-// NOW define JWT_SECRET (after dotenv loaded)
+// STEP 2: Require all modules
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const twilio = require('twilio');
+
+// STEP 3: Define constants AFTER dotenv loaded
 const JWT_SECRET =
   process.env.JWT_SECRET ||
   'jwt-fallback-secret-12345678901234567890-change-in-production';
 
-// THEN do debugging logs
+const DB_URL =
+  process.env.DATABASE_URL ||
+  'postgresql://postgres.oujbkosgxgxecsmrdwjo:4r4espTPnbFACW5l@aws-1-eu-west-1.pooler.supabase.com:5432/postgres';
+
+// ============================================
+// DEBUG LOGGING
+// ============================================
 console.log('=== ENVIRONMENT VARIABLES CHECK ===');
 console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
 console.log('JWT_SECRET exists:', !!process.env.JWT_SECRET);
@@ -25,23 +40,15 @@ if (process.env.DATABASE_URL) {
 }
 console.log('====================================');
 
-// THEN require other modules
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const cors = require('cors');
-const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
+// ============================================
+// STRIPE SETUP
+// ============================================
 let stripe;
 try {
   if (process.env.STRIPE_SECRET_KEY) {
     stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
   } else {
     console.warn('⚠️ Using mock Stripe - real payments disabled');
-    // Mock Stripe for testing
     stripe = {
       customers: {
         create: async (obj) => ({ id: 'cus_test_' + Date.now() }),
@@ -55,7 +62,6 @@ try {
   }
 } catch (err) {
   console.error('Stripe initialization error:', err.message);
-  // Use mock on error too
   stripe = {
     customers: {
       create: async (obj) => ({ id: 'cus_test_' + Date.now() }),
@@ -67,28 +73,26 @@ try {
     },
   };
 }
-const twilio = require('twilio');
 
 // ============================================
-// SETUP
+// EXPRESS SETUP
 // ============================================
-
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Database connection
-const dbUrl =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres.oujbkosgxgxecsmrdwjo:4r4espTPnbFACW5l@aws-1-eu-west-1.pooler.supabase.com:5432/postgres';
-
+// ============================================
+// DATABASE SETUP
+// ============================================
 const pool = new Pool({
-  connectionString: dbUrl,
+  connectionString: DB_URL,
 });
 
-console.log('🔍 Database URL:', dbUrl.substring(0, 50) + '...');
+console.log('🔍 Database URL:', DB_URL.substring(0, 50) + '...');
 
-// Twilio client
+// ============================================
+// TWILIO SETUP
+// ============================================
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN,
@@ -97,13 +101,12 @@ const twilioClient = twilio(
 // ============================================
 // MIDDLEWARE
 // ============================================
-
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.userId = decoded.id;
     next();
   } catch (err) {
@@ -114,7 +117,6 @@ const authMiddleware = (req, res, next) => {
 // ============================================
 // INITIALIZE DATABASE
 // ============================================
-
 const initDb = async () => {
   try {
     await pool.query(`
@@ -176,13 +178,11 @@ const initDb = async () => {
   }
 };
 
-// Initialize DB on start
 initDb();
 
 // ============================================
 // HEALTH CHECK
 // ============================================
-
 app.get('/health', (req, res) => {
   res.json({ status: '✅ OK', timestamp: new Date() });
 });
@@ -216,7 +216,7 @@ app.post('/auth/signup', async (req, res) => {
     });
     console.log('4. Stripe customer created:', customer.id);
 
-    // Calculate trial end date
+    // Calculate trial end date (30 days)
     const trialEndDate = new Date();
     trialEndDate.setDate(trialEndDate.getDate() + 30);
     console.log('5. Trial date calculated');
@@ -241,17 +241,18 @@ app.post('/auth/signup', async (req, res) => {
     console.log('6. User created in DB');
 
     const userId = result.rows[0].id;
+
+    // Create JWT token
     const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '7d' });
     console.log('7. JWT token created');
 
     res.json({
       token,
       user: result.rows[0],
-      message: '✅ Account created!',
+      message: '✅ Account created! 30-day free trial activated',
     });
   } catch (err) {
-    console.error('❌ Signup error at step:', err.message);
-    console.error('Full error:', err);
+    console.error('❌ Signup error:', err.message);
     res.status(400).json({ error: err.message });
   }
 });
@@ -274,9 +275,7 @@ app.post('/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Invalid password' });
     }
 
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, {
-      expiresIn: '7d',
-    });
+    const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
       token,
       user: {
@@ -293,7 +292,6 @@ app.post('/auth/login', async (req, res) => {
 // ============================================
 // DASHBOARD
 // ============================================
-
 app.get('/api/dashboard', authMiddleware, async (req, res) => {
   try {
     const user = await pool.query('SELECT * FROM users WHERE id = $1', [
@@ -438,7 +436,6 @@ app.post('/api/cancel-subscription', authMiddleware, async (req, res) => {
 // ============================================
 // WHATSAPP WEBHOOK
 // ============================================
-
 app.post('/whatsapp/webhook', async (req, res) => {
   const incoming = req.body;
   const from = incoming.From;
@@ -486,7 +483,6 @@ app.post('/whatsapp/webhook', async (req, res) => {
 // ============================================
 // TEMPLATES
 // ============================================
-
 app.get('/api/templates', authMiddleware, async (req, res) => {
   try {
     const templates = await pool.query(
@@ -516,7 +512,6 @@ app.post('/api/templates', authMiddleware, async (req, res) => {
 // ============================================
 // BOOKINGS
 // ============================================
-
 app.get('/api/bookings', authMiddleware, async (req, res) => {
   try {
     const bookings = await pool.query(
@@ -547,7 +542,6 @@ app.post('/api/bookings', authMiddleware, async (req, res) => {
 // ============================================
 // START SERVER
 // ============================================
-
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`
