@@ -1,5 +1,5 @@
 // ============================================
-// MESSAGEFLOW BACKEND - COMPLETE SERVER
+// MESSAGEFLOW BACKEND - COMPLETE SERVER (FIXED)
 // ============================================
 
 // STEP 1: Load dotenv FIRST
@@ -15,40 +15,68 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
-// STEP 3: Define constants AFTER dotenv loaded
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  'jwt-fallback-secret-12345678901234567890-change-in-production';
+// STEP 3: Define ALL constants with Railway fallbacks
+// ============================================
+// ENVIRONMENT VARIABLES WITH FALLBACKS
+// ============================================
+// Railway bug: variables not passed to Node.js
+// Solution: use fallbacks (will use Railway vars if available)
 
 const DB_URL =
   process.env.DATABASE_URL ||
   'postgresql://postgres.oujbkosgxgxecsmrdwjo:4r4espTPnbFACW5l@aws-1-eu-west-1.pooler.supabase.com:5432/postgres';
 
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  'asdfjklzxcvbnmasdfghjklqwertyuiopzxcvbnm1234567890';
+
+const STRIPE_KEY =
+  process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder_never_use_this';
+
+const STRIPE_PUBLIC_KEY =
+  process.env.STRIPE_PUBLIC_KEY || 'pk_test_placeholder_never_use_this';
+
+const TWILIO_SID =
+  process.env.TWILIO_ACCOUNT_SID || 'AC_placeholder_never_use_this';
+
+const TWILIO_TOKEN =
+  process.env.TWILIO_AUTH_TOKEN || 'token_placeholder_never_use_this';
+
+const TWILIO_NUM =
+  process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
+
 // ============================================
 // DEBUG LOGGING
 // ============================================
-console.log('=== ENVIRONMENT VARIABLES CHECK ===');
-console.log('DATABASE_URL exists:', !!process.env.DATABASE_URL);
-console.log('JWT_SECRET exists:', !!process.env.JWT_SECRET);
-console.log('STRIPE_SECRET_KEY exists:', !!process.env.STRIPE_SECRET_KEY);
-console.log('NODE_ENV:', process.env.NODE_ENV);
-if (process.env.DATABASE_URL) {
-  console.log(
-    'DATABASE_URL starts with:',
-    process.env.DATABASE_URL.substring(0, 50),
-  );
-}
-console.log('====================================');
+console.log('\n🔍 ENV VARS STATUS:');
+console.log(
+  '  DATABASE_URL:',
+  process.env.DATABASE_URL ? '✅ from Railway' : '⚠️ using fallback',
+);
+console.log(
+  '  JWT_SECRET:',
+  process.env.JWT_SECRET ? '✅ from Railway' : '⚠️ using fallback',
+);
+console.log(
+  '  STRIPE_SECRET_KEY:',
+  process.env.STRIPE_SECRET_KEY ? '✅ from Railway' : '⚠️ using fallback',
+);
+console.log(
+  '  TWILIO_ACCOUNT_SID:',
+  process.env.TWILIO_ACCOUNT_SID ? '✅ from Railway' : '⚠️ using fallback',
+);
+console.log('');
 
 // ============================================
 // STRIPE SETUP
 // ============================================
 let stripe;
 try {
-  if (process.env.STRIPE_SECRET_KEY) {
-    stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  if (STRIPE_KEY && !STRIPE_KEY.includes('placeholder')) {
+    stripe = require('stripe')(STRIPE_KEY);
+    console.log('✅ Stripe: Real (using API key)');
   } else {
-    console.warn('⚠️ Using mock Stripe - real payments disabled');
+    console.warn('⚠️ Stripe: Using mock (real payments disabled)');
     stripe = {
       customers: {
         create: async (obj) => ({ id: 'cus_test_' + Date.now() }),
@@ -94,9 +122,10 @@ console.log('🔍 Database URL:', DB_URL.substring(0, 50) + '...');
 // ============================================
 // TWILIO SETUP
 // ============================================
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN,
+const twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
+console.log(
+  'Twilio:',
+  TWILIO_SID && !TWILIO_SID.includes('placeholder') ? '✅ Ready' : '⚠️ Mock',
 );
 
 // ============================================
@@ -465,7 +494,7 @@ app.post('/whatsapp/webhook', async (req, res) => {
 
       if (templates.rows[0]) {
         await twilioClient.messages.create({
-          from: process.env.TWILIO_WHATSAPP_NUMBER,
+          from: TWILIO_NUM,
           to: from,
           body: templates.rows[0].template_text,
         });
@@ -549,7 +578,7 @@ app.listen(PORT, () => {
 ╔════════════════════════════════════════╗
 ║   🚀 MessageFlow Backend Running      ║
 ║   Port: ${PORT}                            
-║   Environment: ${process.env.NODE_ENV}                  
+║   Environment: ${process.env.NODE_ENV || 'development'}                  
 ║   Database: Connected                 ║
 ║   Stripe: Ready                        ║
 ║   Twilio: Ready                        ║
