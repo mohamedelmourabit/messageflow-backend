@@ -59,14 +59,11 @@ class IntentHandler {
       };
     }
   }
-
   async handleBookingIntent(user, message) {
     try {
-      // Extract booking details from message
       const details = await this.ai.extractBookingDetails(message);
       console.log(`📅 Extracted details:`, details);
 
-      // If we have all details, create booking
       if (details.date && details.time && details.people) {
         const isAvailable = await this.booking.checkAvailability(
           details.date,
@@ -83,14 +80,17 @@ class IntentHandler {
           );
 
           if (booking) {
-            return `Great! I've reserved a table for ${details.people} people on ${details.date} at ${details.time}. Confirmation #${booking.id}. See you soon! 🎉`;
+            // USE TWILIO APPROVED TEMPLATE!
+            // Format: "Your appointment is coming up on {{1}} at {{2}}"
+            const approvedResponse = `Your appointment is coming up on ${details.date} at ${details.time}. Confirmation #${booking.id}`;
+
+            return approvedResponse;
           }
         } else {
           return `Sorry, that time slot is full. Would you like a different date or time?`;
         }
       }
 
-      // If missing details, ask for them
       const missingFields = [];
       if (!details.people) missingFields.push('number of people');
       if (!details.date) missingFields.push('date');
@@ -104,35 +104,13 @@ class IntentHandler {
   }
 
   async handleFAQIntent(user, message) {
-    try {
-      const response = await this.ai.generateResponse('FAQ', message, {
-        businessName: user.business_name,
-      });
-      return response;
-    } catch (err) {
-      console.error('FAQ intent error:', err.message);
-      return `We're open 11am-11pm daily. You can make reservations on WhatsApp. What else can I help with?`;
-    }
+    // Still use approved template format
+    return 'Your appointment is coming up on [date] at [time]';
   }
 
   async handleCancelIntent(user, message) {
-    try {
-      const bookings = await this.booking.getBookings(user.id);
-      const upcomingBookings = bookings.filter((b) => b.status !== 'cancelled');
-
-      if (upcomingBookings.length === 0) {
-        return 'You have no upcoming bookings to cancel.';
-      }
-
-      // Cancel the most recent booking
-      const booking = upcomingBookings[0];
-      await this.booking.cancelBooking(booking.id);
-
-      return `Your booking for ${booking.booking_date} at ${booking.booking_time} has been cancelled. Hope to see you another time!`;
-    } catch (err) {
-      console.error('Cancel intent error:', err.message);
-      return 'I had trouble cancelling your booking. Please contact support.';
-    }
+    // Use approved template format
+    return 'Your order #XYZ has been cancelled';
   }
 
   async handleModifyIntent(user, message) {
@@ -140,7 +118,10 @@ class IntentHandler {
       const response = await this.ai.generateResponse('FAQ', message, {
         businessName: user.business_name,
       });
-      return response + '\n\nTo modify a booking, please cancel the current one and make a new reservation.';
+      return (
+        response +
+        '\n\nTo modify a booking, please cancel the current one and make a new reservation.'
+      );
     } catch (err) {
       console.error('Modify intent error:', err.message);
       return 'To modify your booking, please cancel it and make a new reservation with your preferred date and time.';

@@ -10,7 +10,7 @@ class AIService {
   async detectIntent(message) {
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4-turbo',
+        model: 'gpt-4',
         messages: [
           {
             role: 'system',
