@@ -489,6 +489,14 @@ app.post('/api/cancel-subscription', authMiddleware, async (req, res) => {
 // ============================================
 // WHATSAPP WEBHOOK
 // ============================================
+// TWILIO PRE-APPROVED TEMPLATES
+const TWILIO_TEMPLATES = {
+  appointment_reminder:
+    'Your appointment is coming up on {{1}} at {{2}}. Reply CONFIRM to confirm.',
+  order_notification: 'Your order {{1}} has been {{2}}. Track it here: {{3}}',
+  verification_code: 'Your verification code is {{1}}. Do not share this code.',
+};
+
 app.post('/whatsapp/webhook', async (req, res) => {
   const incoming = req.body;
   const from = incoming.From;
@@ -496,7 +504,6 @@ app.post('/whatsapp/webhook', async (req, res) => {
 
   console.log(`📱 Message from ${from}: ${messageBody}`);
 
-  // Store message
   try {
     const user = await pool.query(
       'SELECT id FROM users WHERE whatsapp_number LIKE $1',
@@ -504,38 +511,22 @@ app.post('/whatsapp/webhook', async (req, res) => {
     );
 
     if (user.rows[0]) {
+      // Store message
       await pool.query(
         'INSERT INTO messages (user_id, phone, message_text, direction) VALUES ($1, $2, $3, $4)',
         [user.rows[0].id, from, messageBody, 'incoming'],
       );
 
-      // Get template and send auto-reply
-      const templates = await pool.query(
-        'SELECT template_text FROM templates WHERE user_id = $1 LIMIT 1',
-        [user.rows[0].id],
-      );
+      // Send APPROVED auto-reply (works in Sandbox!)
+      await twilioClient.messages.create({
+        from: TWILIO_NUM,
+        to: from,
+        body: TWILIO_TEMPLATES.appointment_reminder
+          .replace('{{1}}', '12/1')
+          .replace('{{2}}', '3pm'),
+      });
 
-      if (templates.rows[0]) {
-        // Ensure 'from' is properly formatted as whatsapp number
-        let toNumber = from;
-        if (!toNumber.startsWith('whatsapp:')) {
-          toNumber = 'whatsapp:' + from;
-        }
-
-        await twilioClient.messages.create({
-          from: TWILIO_NUM, // wh
-          to: toNumber, // whats+
-          body: templates.rows[0].template_text,
-        });
-
-        console.log(`✅ Auto-reply sent from ${TWILIO_NUM} to ${toNumber}`);
-
-        console.log(`✅ Auto-reply sent to ${from}`);
-      } else {
-        console.log(`ℹ️ No template for user ${user.rows[0].id}`);
-      }
-    } else {
-      console.log(`ℹ️ No user found for ${from}`);
+      console.log(`✅ Auto-reply sent to ${from}`);
     }
   } catch (err) {
     console.error('WhatsApp error:', err.message);
