@@ -516,11 +516,19 @@ app.post('/whatsapp/webhook', async (req, res) => {
       );
 
       if (templates.rows[0]) {
+        // Ensure 'from' is properly formatted as whatsapp number
+        let toNumber = from;
+        if (!toNumber.startsWith('whatsapp:')) {
+          toNumber = 'whatsapp:' + from;
+        }
+
         await twilioClient.messages.create({
-          from: TWILIO_NUM,
-          to: from,
+          from: TWILIO_NUM, // wh
+          to: toNumber, // whats+
           body: templates.rows[0].template_text,
         });
+
+        console.log(`✅ Auto-reply sent from ${TWILIO_NUM} to ${toNumber}`);
 
         console.log(`✅ Auto-reply sent to ${from}`);
       } else {
