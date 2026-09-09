@@ -20,31 +20,36 @@ const twilio = require('twilio');
 // ENVIRONMENT VARIABLES WITH FALLBACKS
 // ============================================
 // Railway bug: variables not passed to Node.js
-// Solution: use fallbacks (will use Railway vars if available)
+/// ============================================
+// ENVIRONMENT VARIABLES FROM RAILWAY ONLY
+// ============================================
+const DB_URL = process.env.DATABASE_URL;
+const JWT_SECRET = process.env.JWT_SECRET;
+const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_PUBLIC_KEY = process.env.STRIPE_PUBLIC_KEY;
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_NUM = process.env.TWILIO_WHATSAPP_NUMBER;
 
-const DB_URL =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres.oujbkosgxgxecsmrdwjo:4r4espTPnbFACW5l@aws-1-eu-west-1.pooler.supabase.com:5432/postgres';
+// ============================================
+// DEBUG LOGGING
+// ============================================
+console.log('\n🔍 ENV VARS STATUS:');
+console.log('DATABASE_URL:', DB_URL ? '✅ LOADED' : '❌ MISSING');
+console.log('JWT_SECRET:', JWT_SECRET ? '✅ LOADED' : '❌ MISSING');
+console.log('STRIPE_SECRET_KEY:', STRIPE_KEY ? '✅ LOADED' : '❌ MISSING');
+console.log('TWILIO_ACCOUNT_SID:', TWILIO_SID ? '✅ LOADED' : '❌ MISSING');
+console.log('TWILIO_AUTH_TOKEN:', TWILIO_TOKEN ? '✅ LOADED' : '❌ MISSING');
+console.log('TWILIO_WHATSAPP_NUMBER:', TWILIO_NUM ? '✅ LOADED' : '❌ MISSING');
+console.log('');
 
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  'asdfjklzxcvbnmasdfghjklqwertyuiopzxcvbnm1234567890';
-
-const STRIPE_KEY =
-  process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder_never_use_this';
-
-const STRIPE_PUBLIC_KEY =
-  process.env.STRIPE_PUBLIC_KEY || 'pk_test_placeholder_never_use_this';
-
-const TWILIO_SID =
-  process.env.TWILIO_ACCOUNT_SID || 'AC_placeholder_never_use_this';
-
-const TWILIO_TOKEN =
-  process.env.TWILIO_AUTH_TOKEN || 'token_placeholder_never_use_this';
-
-const TWILIO_NUM =
-  process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
-
+// VERIFY ALL REQUIRED VARS ARE LOADED
+if (!DB_URL || !JWT_SECRET || !TWILIO_SID || !TWILIO_TOKEN) {
+  console.error(
+    '❌ CRITICAL: Missing required environment variables from Railway!',
+  );
+  console.error('Check Railway Variables tab and ensure all 6 vars are set!');
+}
 // ============================================
 // DEBUG LOGGING
 // ============================================
