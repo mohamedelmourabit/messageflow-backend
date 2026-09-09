@@ -1,12 +1,23 @@
 // ============================================
-// MESSAGEFLOW BACKEND - COMPLETE SERVER
+// MESSAGEFLOW BACKEND
 // ============================================
+
+require('dotenv').config();
+
+// ============================================
+// IMPORTS
+// ============================================
+
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const twilio = require('twilio');
 
 // ============================================
 // ENVIRONMENT VARIABLES
 // ============================================
-
-require('dotenv').config();
 
 const DB_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -37,7 +48,8 @@ const missingVars = Object.entries(requiredVars)
   .map(([name]) => name);
 
 if (missingVars.length > 0) {
-  console.error('❌ Missing environment variables:');
+  console.error(' Missing environment variables:');
+
   missingVars.forEach((name) => {
     console.error(`   - ${name}`);
   });
@@ -54,6 +66,7 @@ console.log('   STRIPE_WEBHOOK_SECRET:', STRIPE_WEBHOOK_SECRET ? '✅' : '⚠️
 console.log('   TWILIO_ACCOUNT_SID: ✅');
 console.log('   TWILIO_AUTH_TOKEN: ✅');
 console.log('   TWILIO_WHATSAPP_NUMBER: ✅');
+
 // ============================================
 // STRIPE SETUP
 // ============================================
