@@ -1,13 +1,13 @@
 // ============================================
-// MESSAGEFLOW BACKEND
+// MESSAGEFLOW BACKEND - OOP REFACTORED
 // ============================================
 
-require('dotenv').config();
+// STEP 1: Load dotenv
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
 
-// ============================================
-// IMPORTS
-// ============================================
-
+// STEP 2: Require all modules
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -15,57 +15,34 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
+// STEP 3: Import services and handlers
+const AIService = require('./services/AIService');
+const WhatsAppService = require('./services/WhatsAppService');
+const BookingService = require('./services/BookingService');
+const IntentHandler = require('./handlers/IntentHandler');
+
 // ============================================
 // ENVIRONMENT VARIABLES
 // ============================================
-
 const DB_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
-
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_PUBLIC_KEY = process.env.STRIPE_PUBLIC_KEY;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
-
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_NUM = process.env.TWILIO_WHATSAPP_NUMBER;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
 // ============================================
-// CHECK ENV
+// DEBUG LOGGING
 // ============================================
-
-const requiredVars = {
-  DATABASE_URL: DB_URL,
-  JWT_SECRET: JWT_SECRET,
-  STRIPE_SECRET_KEY: STRIPE_KEY,
-  TWILIO_ACCOUNT_SID: TWILIO_SID,
-  TWILIO_AUTH_TOKEN: TWILIO_TOKEN,
-  TWILIO_WHATSAPP_NUMBER: TWILIO_NUM,
-};
-
-const missingVars = Object.entries(requiredVars)
-  .filter(([name, value]) => !value)
-  .map(([name]) => name);
-
-if (missingVars.length > 0) {
-  console.error(' Missing environment variables:');
-
-  missingVars.forEach((name) => {
-    console.error(`   - ${name}`);
-  });
-
-  process.exit(1);
-}
-
-console.log('✅ Environment variables loaded');
-console.log('   DATABASE_URL: ✅');
-console.log('   JWT_SECRET: ✅');
-console.log('   STRIPE_SECRET_KEY: ✅');
-console.log('   STRIPE_PUBLIC_KEY:', STRIPE_PUBLIC_KEY ? '✅' : '⚠️');
-console.log('   STRIPE_WEBHOOK_SECRET:', STRIPE_WEBHOOK_SECRET ? '✅' : '⚠️');
-console.log('   TWILIO_ACCOUNT_SID: ✅');
-console.log('   TWILIO_AUTH_TOKEN: ✅');
-console.log('   TWILIO_WHATSAPP_NUMBER: ✅');
+console.log('\n🔍 ENVIRONMENT VARIABLES CHECK:');
+console.log('DATABASE_URL:', DB_URL ? '✅ LOADED' : '❌ MISSING');
+console.log('JWT_SECRET:', JWT_SECRET ? '✅ LOADED' : '❌ MISSING');
+console.log('STRIPE_SECRET_KEY:', STRIPE_KEY ? '✅ LOADED' : '❌ MISSING');
+console.log('TWILIO_ACCOUNT_SID:', TWILIO_SID ? '✅ LOADED' : '❌ MISSING');
+console.log('OPENAI_API_KEY:', OPENAI_KEY ? '✅ LOADED' : '❌ MISSING');
+console.log('');
 
 // ============================================
 // STRIPE SETUP
@@ -76,7 +53,7 @@ try {
     stripe = require('stripe')(STRIPE_KEY);
     console.log('✅ Stripe: Initialized with real key');
   } else {
-    console.warn('⚠️ Stripe: MISSING KEY - Using mock');
+    console.warn('⚠️ Stripe: Using mock (real payments disabled)');
     stripe = {
       customers: {
         create: async (obj) => ({ id: 'cus_test_' + Date.now() }),
@@ -113,41 +90,32 @@ app.use(cors());
 // ============================================
 // DATABASE SETUP
 // ============================================
-let pool;
-if (DB_URL) {
-  pool = new Pool({
-    connectionString: DB_URL,
-  });
-  console.log('✅ Database: Pool created');
-} else {
-  console.error('❌ Database: URL missing - DB operations will fail!');
-  // Create dummy pool to prevent crashes
-  pool = new Pool({
-    host: 'localhost',
-    port: 5432,
-    database: 'dummy',
-  });
-}
+const pool = new Pool({
+  connectionString: DB_URL,
+});
+
+console.log('✅ Database: Pool created');
 
 // ============================================
 // TWILIO SETUP
 // ============================================
-let twilioClient;
-if (TWILIO_SID && TWILIO_TOKEN) {
-  twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
-  console.log('✅ Twilio: Initialized');
-} else {
-  console.error('❌ Twilio: Missing SID or TOKEN - WhatsApp will not work!');
-  // Create dummy client
-  twilioClient = {
-    messages: {
-      create: async (obj) => {
-        console.warn('⚠️ Twilio dummy - message not sent:', obj);
-        return { sid: 'dummy_' + Date.now() };
-      },
-    },
-  };
-}
+const twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
+console.log('✅ Twilio: Initialized');
+
+// ============================================
+// INITIALIZE SERVICES
+// ============================================
+const aiService = new AIService(OPENAI_KEY);
+const whatsappService = new WhatsAppService(twilioClient, pool, TWILIO_NUM);
+const bookingService = new BookingService(pool);
+const intentHandler = new IntentHandler(
+  aiService,
+  whatsappService,
+  bookingService,
+);
+
+console.log('✅ Services: Initialized');
+console.log('');
 
 // ============================================
 // MIDDLEWARE
@@ -229,9 +197,7 @@ const initDb = async () => {
   }
 };
 
-if (DB_URL) {
-  initDb();
-}
+initDb();
 
 // ============================================
 // HEALTH CHECK
@@ -244,7 +210,6 @@ app.get('/health', (req, res) => {
 // AUTH ROUTES
 // ============================================
 
-// SIGNUP
 app.post('/auth/signup', async (req, res) => {
   const { email, password, businessName, businessType, whatsappNumber } =
     req.body;
@@ -252,29 +217,24 @@ app.post('/auth/signup', async (req, res) => {
   try {
     console.log('1. Received data:', { email, businessName });
 
-    // Validate input
     if (!email || !password || !businessName) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     console.log('2. Data validated');
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
     console.log('3. Password hashed');
 
-    // Create Stripe customer
     const customer = await stripe.customers.create({
       email,
       metadata: { businessName, businessType },
     });
     console.log('4. Stripe customer created:', customer.id);
 
-    // Calculate trial end date (30 days)
     const trialEndDate = new Date();
     trialEndDate.setDate(trialEndDate.getDate() + 30);
     console.log('5. Trial date calculated');
 
-    // Create user
     const result = await pool.query(
       `INSERT INTO users 
        (email, password, business_name, business_type, whatsapp_number, stripe_customer_id, subscription_status, trial_end_date)
@@ -294,8 +254,6 @@ app.post('/auth/signup', async (req, res) => {
     console.log('6. User created in DB');
 
     const userId = result.rows[0].id;
-
-    // Create JWT token
     const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '7d' });
     console.log('7. JWT token created');
 
@@ -310,7 +268,6 @@ app.post('/auth/signup', async (req, res) => {
   }
 });
 
-// LOGIN
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -373,7 +330,6 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
 // STRIPE ROUTES
 // ============================================
 
-// GET PRICING
 app.get('/api/pricing', (req, res) => {
   res.json({
     plans: [
@@ -421,7 +377,6 @@ app.get('/api/pricing', (req, res) => {
   });
 });
 
-// CREATE SUBSCRIPTION
 app.post('/api/subscribe', authMiddleware, async (req, res) => {
   const { planId, paymentMethodId } = req.body;
 
@@ -457,7 +412,6 @@ app.post('/api/subscribe', authMiddleware, async (req, res) => {
   }
 });
 
-// CANCEL SUBSCRIPTION
 app.post('/api/cancel-subscription', authMiddleware, async (req, res) => {
   try {
     const user = await pool.query('SELECT * FROM users WHERE id = $1', [
@@ -487,60 +441,47 @@ app.post('/api/cancel-subscription', authMiddleware, async (req, res) => {
 });
 
 // ============================================
-// WHATSAPP WEBHOOK
+// WHATSAPP WEBHOOK - USING SERVICES & HANDLERS
 // ============================================
-// TWILIO PRE-APPROVED TEMPLATES
-const TWILIO_TEMPLATES = {
-  appointment_reminder:
-    'Your appointment is coming up on {{1}} at {{2}}. Reply CONFIRM to confirm.',
-  order_notification: 'Your order {{1}} has been {{2}}. Track it here: {{3}}',
-  verification_code: 'Your verification code is {{1}}. Do not share this code.',
-};
-
 app.post('/whatsapp/webhook', async (req, res) => {
-  const incoming = req.body;
-  const from = incoming.From;
-  const messageBody = incoming.Body;
+  const from = req.body.From;
+  const messageBody = req.body.Body;
 
-  console.log(`📱 Message from ${from}: ${messageBody}`);
+  console.log(`\n📱 Message from ${from}: ${messageBody}`);
 
   try {
-    const user = await pool.query(
-      'SELECT id FROM users WHERE whatsapp_number LIKE $1',
-      [`%${from.slice(-10)}%`],
+    // 1. GET USER
+    const user = await whatsappService.getUserByPhone(from);
+    if (!user) {
+      console.log('ℹ️ No user found for', from);
+      return res.send('OK');
+    }
+
+    // 2. STORE INCOMING MESSAGE
+    await whatsappService.storeMessage(user.id, from, messageBody, 'incoming');
+
+    // 3. HANDLE WITH AI & INTENT ROUTING
+    const { intent, response } = await intentHandler.handleMessage(
+      user,
+      from,
+      messageBody,
     );
 
-    if (user.rows[0]) {
-      // STORE message
-      await pool.query(
-        'INSERT INTO messages (user_id, phone, message_text, direction) VALUES ($1, $2, $3, $4)',
-        [user.rows[0].id, from, messageBody, 'incoming'],
-      );
+    // 4. SEND RESPONSE
+    const sent = await whatsappService.sendMessage(from, response);
 
-      // SEND APPROVED auto-reply using Twilio template
-      try {
-        await twilioClient.messages.create({
-          from: TWILIO_NUM,
-          to: from,
-          body:
-            'Thanks for contacting us! We received your message: "' +
-            messageBody +
-            '". We will reply within 24 hours.',
-        });
-        console.log(`✅ Auto-reply sent to ${from}`);
-      } catch (twilioErr) {
-        console.log('ℹ️ Sandbox limitation - using approved template only');
-        // In Sandbox, only pre-approved Twilio templates work
-        // This is a Sandbox limitation, will work in Production
-      }
+    if (sent.success) {
+      // 5. STORE OUTGOING MESSAGE
+      await whatsappService.storeMessage(user.id, from, response, 'outgoing');
     }
-  } catch (err) {
-    console.error('WhatsApp error:', err.message);
-  }
 
-  const twiml = new twilio.twiml.MessagingResponse();
-  res.type('text/xml').send(twiml.toString());
+    res.send('OK');
+  } catch (err) {
+    console.error('WhatsApp webhook error:', err.message);
+    res.send('OK'); // Always respond OK to Twilio
+  }
 });
+
 // ============================================
 // TEMPLATES
 // ============================================
@@ -575,11 +516,8 @@ app.post('/api/templates', authMiddleware, async (req, res) => {
 // ============================================
 app.get('/api/bookings', authMiddleware, async (req, res) => {
   try {
-    const bookings = await pool.query(
-      'SELECT * FROM bookings WHERE user_id = $1 ORDER BY booking_date DESC',
-      [req.userId],
-    );
-    res.json(bookings.rows);
+    const bookings = await bookingService.getBookings(req.userId);
+    res.json(bookings);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -589,12 +527,14 @@ app.post('/api/bookings', authMiddleware, async (req, res) => {
   const { customerName, customerPhone, bookingDate, bookingTime } = req.body;
 
   try {
-    const result = await pool.query(
-      `INSERT INTO bookings (user_id, customer_name, customer_phone, booking_date, booking_time)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [req.userId, customerName, customerPhone, bookingDate, bookingTime],
+    const booking = await bookingService.createBooking(
+      req.userId,
+      customerName,
+      customerPhone,
+      bookingDate,
+      bookingTime,
     );
-    res.json(result.rows[0]);
+    res.json(booking);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -608,11 +548,13 @@ app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
 ║   🚀 MessageFlow Backend Running      ║
+║   OOP Architecture                     
 ║   Port: ${PORT}                            
 ║   Environment: ${process.env.NODE_ENV || 'development'}                  
 ║   Database: ${DB_URL ? 'Connected' : 'MISSING'}                        
 ║   Stripe: ${STRIPE_KEY ? 'Ready' : 'MISSING'}                        
 ║   Twilio: ${TWILIO_SID ? 'Ready' : 'MISSING'}                        
+║   OpenAI: ${OPENAI_KEY ? 'Ready' : 'MISSING'}                       
 ╚════════════════════════════════════════╝
   `);
 });
