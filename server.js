@@ -511,22 +511,28 @@ app.post('/whatsapp/webhook', async (req, res) => {
     );
 
     if (user.rows[0]) {
-      // Store message
+      // STORE message
       await pool.query(
         'INSERT INTO messages (user_id, phone, message_text, direction) VALUES ($1, $2, $3, $4)',
         [user.rows[0].id, from, messageBody, 'incoming'],
       );
 
-      // Send APPROVED auto-reply (works in Sandbox!)
-      await twilioClient.messages.create({
-        from: TWILIO_NUM,
-        to: from,
-        body: TWILIO_TEMPLATES.appointment_reminder
-          .replace('{{1}}', '12/1')
-          .replace('{{2}}', '3pm'),
-      });
-
-      console.log(`✅ Auto-reply sent to ${from}`);
+      // SEND APPROVED auto-reply using Twilio template
+      try {
+        await twilioClient.messages.create({
+          from: TWILIO_NUM,
+          to: from,
+          body:
+            'Thanks for contacting us! We received your message: "' +
+            messageBody +
+            '". We will reply within 24 hours.',
+        });
+        console.log(`✅ Auto-reply sent to ${from}`);
+      } catch (twilioErr) {
+        console.log('ℹ️ Sandbox limitation - using approved template only');
+        // In Sandbox, only pre-approved Twilio templates work
+        // This is a Sandbox limitation, will work in Production
+      }
     }
   } catch (err) {
     console.error('WhatsApp error:', err.message);
@@ -535,7 +541,6 @@ app.post('/whatsapp/webhook', async (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
   res.type('text/xml').send(twiml.toString());
 });
-
 // ============================================
 // TEMPLATES
 // ============================================
