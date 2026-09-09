@@ -1,5 +1,5 @@
 // ============================================
-// MESSAGEFLOW BACKEND - COMPLETE SERVER (FIXED)
+// MESSAGEFLOW BACKEND - COMPLETE SERVER
 // ============================================
 
 // STEP 1: Load dotenv FIRST
@@ -15,12 +15,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const twilio = require('twilio');
 
-// STEP 3: Define ALL constants with Railway fallbacks
 // ============================================
-// ENVIRONMENT VARIABLES WITH FALLBACKS
-// ============================================
-// Railway bug: variables not passed to Node.js
-/// ============================================
 // ENVIRONMENT VARIABLES FROM RAILWAY ONLY
 // ============================================
 const DB_URL = process.env.DATABASE_URL;
@@ -32,56 +27,58 @@ const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_NUM = process.env.TWILIO_WHATSAPP_NUMBER;
 
 // ============================================
-// DEBUG LOGGING
+// DEBUG LOGGING (WITH ERROR HANDLING)
 // ============================================
-console.log('\n🔍 ENV VARS STATUS:');
+console.log('\n🔍 ENVIRONMENT VARIABLES CHECK:');
 console.log('DATABASE_URL:', DB_URL ? '✅ LOADED' : '❌ MISSING');
 console.log('JWT_SECRET:', JWT_SECRET ? '✅ LOADED' : '❌ MISSING');
 console.log('STRIPE_SECRET_KEY:', STRIPE_KEY ? '✅ LOADED' : '❌ MISSING');
+console.log(
+  'STRIPE_PUBLIC_KEY:',
+  STRIPE_PUBLIC_KEY ? '✅ LOADED' : '❌ MISSING',
+);
 console.log('TWILIO_ACCOUNT_SID:', TWILIO_SID ? '✅ LOADED' : '❌ MISSING');
 console.log('TWILIO_AUTH_TOKEN:', TWILIO_TOKEN ? '✅ LOADED' : '❌ MISSING');
 console.log('TWILIO_WHATSAPP_NUMBER:', TWILIO_NUM ? '✅ LOADED' : '❌ MISSING');
+
+// Show partial values for debugging
+if (DB_URL) {
+  console.log('  DATABASE_URL starts with:', DB_URL.substring(0, 50) + '...');
+}
+if (TWILIO_SID) {
+  console.log('  TWILIO_SID:', TWILIO_SID);
+}
+
 console.log('');
 
-// VERIFY ALL REQUIRED VARS ARE LOADED
-if (!DB_URL || !JWT_SECRET || !TWILIO_SID || !TWILIO_TOKEN) {
-  console.error(
-    '❌ CRITICAL: Missing required environment variables from Railway!',
-  );
-  console.error('Check Railway Variables tab and ensure all 6 vars are set!');
+// CRITICAL CHECK
+const MISSING_VARS = [];
+if (!DB_URL) MISSING_VARS.push('DATABASE_URL');
+if (!JWT_SECRET) MISSING_VARS.push('JWT_SECRET');
+if (!TWILIO_SID) MISSING_VARS.push('TWILIO_ACCOUNT_SID');
+if (!TWILIO_TOKEN) MISSING_VARS.push('TWILIO_AUTH_TOKEN');
+if (!TWILIO_NUM) MISSING_VARS.push('TWILIO_WHATSAPP_NUMBER');
+
+if (MISSING_VARS.length > 0) {
+  console.error('\n⚠️⚠️⚠️ CRITICAL: MISSING VARIABLES ⚠️⚠️⚠️');
+  console.error('The following variables are NOT set in Railway:');
+  MISSING_VARS.forEach((v) => console.error('  - ' + v));
+  console.error('\nFIX: Go to railway.app → Variables tab');
+  console.error('     Make sure ALL variables are filled with real values');
+  console.error('     Then REBUILD (not restart)');
+  console.error('');
 }
-// ============================================
-// DEBUG LOGGING
-// ============================================
-console.log('\n🔍 ENV VARS STATUS:');
-console.log(
-  '  DATABASE_URL:',
-  process.env.DATABASE_URL ? '✅ from Railway' : '⚠️ using fallback',
-);
-console.log(
-  '  JWT_SECRET:',
-  process.env.JWT_SECRET ? '✅ from Railway' : '⚠️ using fallback',
-);
-console.log(
-  '  STRIPE_SECRET_KEY:',
-  process.env.STRIPE_SECRET_KEY ? '✅ from Railway' : '⚠️ using fallback',
-);
-console.log(
-  '  TWILIO_ACCOUNT_SID:',
-  process.env.TWILIO_ACCOUNT_SID ? '✅ from Railway' : '⚠️ using fallback',
-);
-console.log('');
 
 // ============================================
 // STRIPE SETUP
 // ============================================
 let stripe;
 try {
-  if (STRIPE_KEY && !STRIPE_KEY.includes('placeholder')) {
+  if (STRIPE_KEY) {
     stripe = require('stripe')(STRIPE_KEY);
-    console.log('✅ Stripe: Real (using API key)');
+    console.log('✅ Stripe: Initialized with real key');
   } else {
-    console.warn('⚠️ Stripe: Using mock (real payments disabled)');
+    console.warn('⚠️ Stripe: MISSING KEY - Using mock');
     stripe = {
       customers: {
         create: async (obj) => ({ id: 'cus_test_' + Date.now() }),
@@ -118,20 +115,41 @@ app.use(cors());
 // ============================================
 // DATABASE SETUP
 // ============================================
-const pool = new Pool({
-  connectionString: DB_URL,
-});
-
-console.log('🔍 Database URL:', DB_URL.substring(0, 50) + '...');
+let pool;
+if (DB_URL) {
+  pool = new Pool({
+    connectionString: DB_URL,
+  });
+  console.log('✅ Database: Pool created');
+} else {
+  console.error('❌ Database: URL missing - DB operations will fail!');
+  // Create dummy pool to prevent crashes
+  pool = new Pool({
+    host: 'localhost',
+    port: 5432,
+    database: 'dummy',
+  });
+}
 
 // ============================================
 // TWILIO SETUP
 // ============================================
-const twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
-console.log(
-  'Twilio:',
-  TWILIO_SID && !TWILIO_SID.includes('placeholder') ? '✅ Ready' : '⚠️ Mock',
-);
+let twilioClient;
+if (TWILIO_SID && TWILIO_TOKEN) {
+  twilioClient = twilio(TWILIO_SID, TWILIO_TOKEN);
+  console.log('✅ Twilio: Initialized');
+} else {
+  console.error('❌ Twilio: Missing SID or TOKEN - WhatsApp will not work!');
+  // Create dummy client
+  twilioClient = {
+    messages: {
+      create: async (obj) => {
+        console.warn('⚠️ Twilio dummy - message not sent:', obj);
+        return { sid: 'dummy_' + Date.now() };
+      },
+    },
+  };
+}
 
 // ============================================
 // MIDDLEWARE
@@ -207,13 +225,15 @@ const initDb = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log('✅ Database initialized');
+    console.log('✅ Database: Tables initialized');
   } catch (err) {
     console.error('DB Error:', err.message);
   }
 };
 
-initDb();
+if (DB_URL) {
+  initDb();
+}
 
 // ============================================
 // HEALTH CHECK
@@ -505,7 +525,11 @@ app.post('/whatsapp/webhook', async (req, res) => {
         });
 
         console.log(`✅ Auto-reply sent to ${from}`);
+      } else {
+        console.log(`ℹ️ No template for user ${user.rows[0].id}`);
       }
+    } else {
+      console.log(`ℹ️ No user found for ${from}`);
     }
   } catch (err) {
     console.error('WhatsApp error:', err.message);
@@ -584,9 +608,9 @@ app.listen(PORT, () => {
 ║   🚀 MessageFlow Backend Running      ║
 ║   Port: ${PORT}                            
 ║   Environment: ${process.env.NODE_ENV || 'development'}                  
-║   Database: Connected                 ║
-║   Stripe: Ready                        ║
-║   Twilio: Ready                        ║
+║   Database: ${DB_URL ? 'Connected' : 'MISSING'}                        
+║   Stripe: ${STRIPE_KEY ? 'Ready' : 'MISSING'}                        
+║   Twilio: ${TWILIO_SID ? 'Ready' : 'MISSING'}                        
 ╚════════════════════════════════════════╝
   `);
 });
