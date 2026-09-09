@@ -2,73 +2,58 @@
 // MESSAGEFLOW BACKEND - COMPLETE SERVER
 // ============================================
 
-// STEP 1: Load dotenv FIRST
-if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
-}
-
-// STEP 2: Require all modules
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const twilio = require('twilio');
-
 // ============================================
-// ENVIRONMENT VARIABLES FROM RAILWAY ONLY
+// ENVIRONMENT VARIABLES
 // ============================================
+
+require('dotenv').config();
+
 const DB_URL = process.env.DATABASE_URL;
 const JWT_SECRET = process.env.JWT_SECRET;
+
 const STRIPE_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_PUBLIC_KEY = process.env.STRIPE_PUBLIC_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_NUM = process.env.TWILIO_WHATSAPP_NUMBER;
 
 // ============================================
-// DEBUG LOGGING (WITH ERROR HANDLING)
+// CHECK ENV
 // ============================================
-console.log('\n🔍 ENVIRONMENT VARIABLES CHECK:');
-console.log('DATABASE_URL:', DB_URL ? '✅ LOADED' : '❌ MISSING');
-console.log('JWT_SECRET:', JWT_SECRET ? '✅ LOADED' : '❌ MISSING');
-console.log('STRIPE_SECRET_KEY:', STRIPE_KEY ? '✅ LOADED' : '❌ MISSING');
-console.log(
-  'STRIPE_PUBLIC_KEY:',
-  STRIPE_PUBLIC_KEY ? '✅ LOADED' : '❌ MISSING',
-);
-console.log('TWILIO_ACCOUNT_SID:', TWILIO_SID ? '✅ LOADED' : '❌ MISSING');
-console.log('TWILIO_AUTH_TOKEN:', TWILIO_TOKEN ? '✅ LOADED' : '❌ MISSING');
-console.log('TWILIO_WHATSAPP_NUMBER:', TWILIO_NUM ? '✅ LOADED' : '❌ MISSING');
 
-// Show partial values for debugging
-if (DB_URL) {
-  console.log('  DATABASE_URL starts with:', DB_URL.substring(0, 50) + '...');
-}
-if (TWILIO_SID) {
-  console.log('  TWILIO_SID:', TWILIO_SID);
-}
+const requiredVars = {
+  DATABASE_URL: DB_URL,
+  JWT_SECRET: JWT_SECRET,
+  STRIPE_SECRET_KEY: STRIPE_KEY,
+  TWILIO_ACCOUNT_SID: TWILIO_SID,
+  TWILIO_AUTH_TOKEN: TWILIO_TOKEN,
+  TWILIO_WHATSAPP_NUMBER: TWILIO_NUM,
+};
 
-console.log('');
+const missingVars = Object.entries(requiredVars)
+  .filter(([name, value]) => !value)
+  .map(([name]) => name);
 
-// CRITICAL CHECK
-const MISSING_VARS = [];
-if (!DB_URL) MISSING_VARS.push('DATABASE_URL');
-if (!JWT_SECRET) MISSING_VARS.push('JWT_SECRET');
-if (!TWILIO_SID) MISSING_VARS.push('TWILIO_ACCOUNT_SID');
-if (!TWILIO_TOKEN) MISSING_VARS.push('TWILIO_AUTH_TOKEN');
-if (!TWILIO_NUM) MISSING_VARS.push('TWILIO_WHATSAPP_NUMBER');
+if (missingVars.length > 0) {
+  console.error('❌ Missing environment variables:');
+  missingVars.forEach((name) => {
+    console.error(`   - ${name}`);
+  });
 
-if (MISSING_VARS.length > 0) {
-  console.error('\n⚠️⚠️⚠️ CRITICAL: MISSING VARIABLES ⚠️⚠️⚠️');
-  console.error('The following variables are NOT set in Railway:');
-  MISSING_VARS.forEach((v) => console.error('  - ' + v));
-  console.error('\nFIX: Go to railway.app → Variables tab');
-  console.error('     Make sure ALL variables are filled with real values');
-  console.error('     Then REBUILD (not restart)');
-  console.error('');
+  process.exit(1);
 }
 
+console.log('✅ Environment variables loaded');
+console.log('   DATABASE_URL: ✅');
+console.log('   JWT_SECRET: ✅');
+console.log('   STRIPE_SECRET_KEY: ✅');
+console.log('   STRIPE_PUBLIC_KEY:', STRIPE_PUBLIC_KEY ? '✅' : '⚠️');
+console.log('   STRIPE_WEBHOOK_SECRET:', STRIPE_WEBHOOK_SECRET ? '✅' : '⚠️');
+console.log('   TWILIO_ACCOUNT_SID: ✅');
+console.log('   TWILIO_AUTH_TOKEN: ✅');
+console.log('   TWILIO_WHATSAPP_NUMBER: ✅');
 // ============================================
 // STRIPE SETUP
 // ============================================
