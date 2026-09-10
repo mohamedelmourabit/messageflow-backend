@@ -554,7 +554,7 @@ app.listen(PORT, () => {
 ║   Database: ${DB_URL ? 'Connected' : 'MISSING'}                        
 ║   Stripe: ${STRIPE_KEY ? 'Ready' : 'MISSING'}                        
 ║   Twilio: ${TWILIO_SID ? 'Ready' : 'MISSING'}                        
-║   OpenAI: ${OPENAI_KEY ? 'Ready' : 'MISSING'}                       
+║   Anthropic: ${ANTHROPIC_KEY ? 'Ready' : 'MISSING'}                       
 ╚════════════════════════════════════════╝
   `);
 });
