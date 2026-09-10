@@ -3,8 +3,9 @@
 // ============================================
 
 // STEP 1: Load dotenv
+// Load dotenv from .env.local in development
 if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
+  require('dotenv').config({ path: '.env.local' });
 }
 
 // STEP 2: Require all modules

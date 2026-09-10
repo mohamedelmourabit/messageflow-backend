@@ -1,119 +1,90 @@
 // services/AIService.js
 
-const OpenAI = require('openai');
+const Anthropic = require('@anthropic-ai/sdk');
 
 class AIService {
   constructor(apiKey) {
-    this.openai = new OpenAI({ apiKey });
+    console.log(
+      '🔑 AIService initialized with key:',
+      apiKey ? '✅ LOADED' : '❌ MISSING',
+    );
+    this.anthropic = new Anthropic({ apiKey });
   }
 
   async detectIntent(message) {
     try {
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4',
+      const response = await this.anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 50,
         messages: [
           {
-            role: 'system',
-            content: `You are a restaurant booking assistant. Analyze the customer message and determine the intent.
-
-Respond with ONLY ONE of these intents:
-- BOOKING: if customer wants to book a table, make a reservation, or check availability
-- FAQ: if customer asks about hours, menu, location, phone, pricing, policies
-- CANCEL: if customer wants to cancel a booking
-- MODIFY: if customer wants to change a booking
-- HUMAN: if customer is angry, needs complex help, or asks for a human
-
-Respond with ONLY the intent word, nothing else.`,
-          },
-          {
             role: 'user',
-            content: message,
+            content: `Respond with ONLY ONE: BOOKING, FAQ, CANCEL, MODIFY, or HUMAN
+
+${message}`,
           },
         ],
-        temperature: 0.3,
       });
 
-      return response.choices[0].message.content.trim().toUpperCase();
+      return response.content[0].text.trim().toUpperCase();
     } catch (err) {
       console.error('AI Intent detection error:', err.message);
-      return 'HUMAN'; // Default to human on error
+      return 'HUMAN';
     }
   }
 
   async generateResponse(intent, message, context = {}) {
     try {
-      const systemPrompt = this.getSystemPrompt(intent, context);
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4-turbo',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: message },
-        ],
-        temperature: 0.7,
+      const response = await this.anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 150,
-      });
-
-      return response.choices[0].message.content;
-    } catch (err) {
-      console.error('AI Response generation error:', err.message);
-      return 'Sorry, I could not process your request. Please try again or contact support.';
-    }
-  }
-
-  getSystemPrompt(intent, context) {
-    const businessName = context.businessName || 'our restaurant';
-
-    const prompts = {
-      BOOKING: `You are a helpful restaurant booking assistant for ${businessName}. 
-        Help the customer book a table. Ask for:
-        1. Number of people
-        2. Date
-        3. Time
-        Keep responses short (1-2 sentences). Be friendly and professional.`,
-
-      FAQ: `You are a helpful restaurant assistant for ${businessName}.
-        Answer the customer's question about the restaurant.
-        Available info: Hours (11am-11pm), accepts reservations on WhatsApp.
-        Keep responses short (1-2 sentences). Be friendly.`,
-
-      BOOKING_CONFIRM: `You are confirming a restaurant booking.
-        Create a brief confirmation with booking details.
-        Keep it short (1 sentence). Include booking number suggestion.`,
-
-      HUMAN: `You are transferring the customer to a human representative.
-        Thank them and let them know someone will help shortly.
-        Keep it very short (1 sentence).`,
-    };
-
-    return prompts[intent] || prompts.FAQ;
-  }
-
-  async extractBookingDetails(message) {
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4-turbo',
         messages: [
           {
-            role: 'system',
-            content: `Extract booking details from the customer message. Return JSON only:
+            role: 'user',
+            content: `You are a restaurant booking assistant. Keep response to 1-2 sentences.
+            
+Customer: ${message}`,
+          },
+        ],
+      });
+
+      return response.content[0].text;
+    } catch (err) {
+      console.error('AI Response error:', err.message);
+      return 'Sorry, I could not process your request.';
+    }
+  }
+  async extractBookingDetails(message) {
+    try {
+      const response = await this.anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        messages: [
+          {
+            role: 'user',
+            content: `Extract booking details. Return ONLY valid JSON:
 {
   "people": number or null,
   "date": "YYYY-MM-DD" or null,
-  "time": "HH:MM" (24h) or null,
-  "name": "customer name" or null,
-  "phone": "phone number" or null
+  "time": "HH:MM" or null,
+  "name": "name" or null,
+  "phone": "phone" or null
 }
 
-If info is missing, use null. Be strict with the format.`,
+Message: "${message}"`,
           },
-          { role: 'user', content: message },
         ],
-        temperature: 0.2,
       });
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content);
+      const content = response.content[0].text.trim();
+
+      // Strip markdown code blocks if present
+      const jsonStr = content
+        .replace(/^```json\n?/, '')
+        .replace(/\n?```$/, '')
+        .trim();
+
+      return JSON.parse(jsonStr);
     } catch (err) {
       console.error('Booking details extraction error:', err.message);
       return { people: null, date: null, time: null, name: null, phone: null };
