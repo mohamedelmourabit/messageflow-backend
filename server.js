@@ -32,8 +32,7 @@ const STRIPE_PUBLIC_KEY = process.env.STRIPE_PUBLIC_KEY;
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_NUM = process.env.TWILIO_WHATSAPP_NUMBER;
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
-
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 // ============================================
 // DEBUG LOGGING
 // ============================================
@@ -42,7 +41,7 @@ console.log('DATABASE_URL:', DB_URL ? '✅ LOADED' : '❌ MISSING');
 console.log('JWT_SECRET:', JWT_SECRET ? '✅ LOADED' : '❌ MISSING');
 console.log('STRIPE_SECRET_KEY:', STRIPE_KEY ? '✅ LOADED' : '❌ MISSING');
 console.log('TWILIO_ACCOUNT_SID:', TWILIO_SID ? '✅ LOADED' : '❌ MISSING');
-console.log('OPENAI_API_KEY:', OPENAI_KEY ? '✅ LOADED' : '❌ MISSING');
+console.log('ANTHROPIC_API_KEY:', ANTHROPIC_KEY ? '✅ LOADED' : '❌ MISSING');
 console.log('');
 
 // ============================================
@@ -106,7 +105,7 @@ console.log('✅ Twilio: Initialized');
 // ============================================
 // INITIALIZE SERVICES
 // ============================================
-const aiService = new AIService(OPENAI_KEY);
+const aiService = new AIService(ANTHROPIC_KEY);
 const whatsappService = new WhatsAppService(twilioClient, pool, TWILIO_NUM);
 const bookingService = new BookingService(pool);
 const intentHandler = new IntentHandler(
