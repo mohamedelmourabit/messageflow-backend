@@ -444,41 +444,58 @@ app.post('/api/cancel-subscription', authMiddleware, async (req, res) => {
 // WHATSAPP WEBHOOK - USING SERVICES & HANDLERS
 // ============================================
 app.post('/whatsapp/webhook', async (req, res) => {
-  const from = req.body.From;
+  const from = req.body.From; // CUSTOMER
+  const to = req.body.To; // BUSINESS WHATSAPP
   const messageBody = req.body.Body;
 
-  console.log(`\n📱 Message from ${from}: ${messageBody}`);
+  console.log('\n📱 WhatsApp message');
+  console.log('Customer:', from);
+  console.log('Business:', to);
+  console.log('Message:', messageBody);
 
   try {
-    // 1. GET USER
-    const user = await whatsappService.getUserByPhone(from);
+    // Find the MessageFlow client/business
+    // using the WhatsApp number that received the message.
+    const result = await pool.query(
+      `SELECT * FROM users
+       WHERE whatsapp_number = $1
+       LIMIT 1`,
+      [to],
+    );
+
+    const user = result.rows[0];
+
     if (!user) {
-      console.log('ℹ️ No user found for', from);
+      console.log('❌ No MessageFlow business found for:', to);
       return res.send('OK');
     }
 
-    // 2. STORE INCOMING MESSAGE
+    console.log(`✅ Business found: ${user.business_name} (ID ${user.id})`);
+
+    // Save customer's message
     await whatsappService.storeMessage(user.id, from, messageBody, 'incoming');
 
-    // 3. HANDLE WITH AI & INTENT ROUTING
+    // AI + business logic
     const { intent, response } = await intentHandler.handleMessage(
       user,
       from,
       messageBody,
     );
 
-    // 4. SEND RESPONSE
+    console.log('🤖 Intent:', intent);
+    console.log('💬 Response:', response);
+
+    // Reply FROM business WhatsApp TO customer
     const sent = await whatsappService.sendMessage(from, response);
 
     if (sent.success) {
-      // 5. STORE OUTGOING MESSAGE
       await whatsappService.storeMessage(user.id, from, response, 'outgoing');
     }
 
     res.send('OK');
   } catch (err) {
-    console.error('WhatsApp webhook error:', err.message);
-    res.send('OK'); // Always respond OK to Twilio
+    console.error('❌ WhatsApp webhook error:', err);
+    res.send('OK');
   }
 });
 
