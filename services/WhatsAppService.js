@@ -50,19 +50,37 @@ class WhatsAppService {
     }
   }
 
-  async sendMessage(toPhone, body) {
+  async sendMessage(fromBusinessNumber, toPhone, body) {
     try {
+      const from = fromBusinessNumber.startsWith('whatsapp:')
+        ? fromBusinessNumber
+        : `whatsapp:${fromBusinessNumber}`;
+
+      const to = toPhone.startsWith('whatsapp:')
+        ? toPhone
+        : `whatsapp:${toPhone}`;
+
+      console.log(`📤 Sending WhatsApp: ${from} → ${to}`);
+
       const message = await this.twilio.messages.create({
-        from: this.twilioNumber,
-        to: toPhone,
-        body: body.substring(0, 1000), // WhatsApp max 1000 chars
+        from,
+        to,
+        body: body.substring(0, 1000),
       });
 
-      console.log(`✅ Message sent to ${toPhone}: ${message.sid}`);
-      return { success: true, sid: message.sid };
+      console.log(`✅ Message sent ${from} → ${to}: ${message.sid}`);
+
+      return {
+        success: true,
+        sid: message.sid,
+      };
     } catch (err) {
       console.error('Send message error:', err.message);
-      return { success: false, error: err.message };
+
+      return {
+        success: false,
+        error: err.message,
+      };
     }
   }
 
