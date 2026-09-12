@@ -182,8 +182,11 @@ class IntentHandler {
       // CHECK AVAILABILITY
       // ============================================================
 
-      const isAvailable = await this.booking.checkAvailability(date, time);
-
+      const isAvailable = await this.booking.checkAvailability(
+        user.id,
+        date,
+        time,
+      );
       if (!isAvailable) {
         return {
           response: await this.generateAIResponse(user, message, {
