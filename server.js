@@ -108,11 +108,11 @@ console.log('✅ Twilio: Initialized');
 const aiService = new AIService(ANTHROPIC_KEY);
 const whatsappService = new WhatsAppService(twilioClient, pool, TWILIO_NUM);
 const bookingService = new BookingService(pool);
-const intentHandler = new IntentHandler(
-  aiService,
-  whatsappService,
-  bookingService,
-);
+const intentHandler = new IntentHandler({
+  ai: aiService,
+  whatsapp: whatsappService,
+  booking: bookingService,
+});
 
 console.log('✅ Services: Initialized');
 console.log('');
