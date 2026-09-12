@@ -190,6 +190,39 @@ const initDb = async () => {
         processed BOOLEAN DEFAULT false,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS whatsapp_accounts (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  phone_number VARCHAR(50) NOT NULL,
+  waba_id VARCHAR(255),
+  phone_number_id VARCHAR(255),
+  sender_id VARCHAR(255),
+  twilio_subaccount_sid VARCHAR(255),
+
+  status VARCHAR(50) DEFAULT 'pending',
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT whatsapp_accounts_phone_unique
+    UNIQUE (phone_number),
+
+  CONSTRAINT whatsapp_accounts_user_phone_unique
+    UNIQUE (user_id, phone_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_user_id
+  ON whatsapp_accounts(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_phone_number
+  ON whatsapp_accounts(phone_number);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_waba_id
+  ON whatsapp_accounts(waba_id);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_phone_number_id
+  ON whatsapp_accounts(phone_number_id);
     `);
     console.log('✅ Database: Tables initialized');
   } catch (err) {
@@ -451,44 +484,52 @@ app.post('/whatsapp/webhook', async (req, res) => {
   console.log(`\n📱 Message from ${from} → ${to}: ${messageBody}`);
 
   try {
-    // 1. FIND THE BUSINESS
-    const result = await pool.query(
-      `SELECT * FROM users
-       WHERE whatsapp_number = $1
-       LIMIT 1`,
-      [to],
-    );
+    // Numéro du restaurant
+    const businessPhone = to?.replace('whatsapp:', '');
 
-    const user = result.rows[0];
+    if (!businessPhone) {
+      console.log('❌ Missing business WhatsApp number');
+      return res.send('OK');
+    }
+
+    // Trouver le business grâce au numéro qui reçoit le message
+    const user =
+      await whatsappService.getBusinessByWhatsAppNumber(businessPhone);
 
     if (!user) {
-      console.log('❌ Business not found:', to);
+      console.log('❌ No business connected to:', businessPhone);
+
       return res.send('OK');
     }
 
     console.log(`✅ Business found: ${user.business_name} (ID: ${user.id})`);
 
-    // 2. STORE INCOMING MESSAGE
+    // Message entrant
     await whatsappService.storeMessage(user.id, from, messageBody, 'incoming');
 
-    // 3. HANDLE WITH AI & INTENT ROUTING
+    // IA
     const { intent, response } = await intentHandler.handleMessage(
       user,
       from,
       messageBody,
     );
 
-    // 4. SEND RESPONSE
-    const sent = await whatsappService.sendMessage(from, response);
+    // Réponse depuis LE NUMÉRO DU RESTAURANT
+    const sent = await whatsappService.sendMessage(
+      user.phone_number,
+      from,
+      response,
+    );
 
+    // Historique
     if (sent.success) {
-      // 5. STORE OUTGOING MESSAGE
       await whatsappService.storeMessage(user.id, from, response, 'outgoing');
     }
 
     res.send('OK');
   } catch (err) {
     console.error('WhatsApp webhook error:', err.message);
+
     res.send('OK');
   }
 });

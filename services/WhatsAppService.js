@@ -7,15 +7,30 @@ class WhatsAppService {
     this.twilioNumber = twilioNumber;
   }
 
-  async getUserByPhone(phone) {
+  async getBusinessByWhatsAppNumber(phone) {
     try {
+      const normalizedPhone = phone.replace('whatsapp:', '');
+
       const result = await this.db.query(
-        `SELECT * FROM users WHERE whatsapp_number LIKE $1`,
-        [`%${phone.slice(-10)}%`],
+        `SELECT
+          u.*,
+          wa.id AS whatsapp_account_id,
+          wa.phone_number,
+          wa.waba_id,
+          wa.phone_number_id,
+          wa.sender_id,
+          wa.twilio_subaccount_sid,
+          wa.status AS whatsapp_status
+       FROM whatsapp_accounts wa
+       JOIN users u ON u.id = wa.user_id
+       WHERE wa.phone_number = $1
+       LIMIT 1`,
+        [normalizedPhone],
       );
+
       return result.rows[0] || null;
     } catch (err) {
-      console.error('Get user by phone error:', err.message);
+      console.error('Get business by WhatsApp number error:', err.message);
       return null;
     }
   }
