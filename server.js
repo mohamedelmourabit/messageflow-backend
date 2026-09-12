@@ -136,8 +136,14 @@ const authMiddleware = (req, res, next) => {
 // ============================================
 // INITIALIZE DATABASE
 // ============================================
+// ============================================
+// INITIALIZE DATABASE
+// ============================================
 const initDb = async () => {
   try {
+    // ==========================================
+    // USERS
+    // ==========================================
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -145,88 +151,410 @@ const initDb = async () => {
         password VARCHAR(255) NOT NULL,
         business_name VARCHAR(255),
         business_type VARCHAR(50),
+
+        -- Legacy field, kept temporarily
         whatsapp_number VARCHAR(50),
+
+        -- Business location / timezone
+        business_country VARCHAR(100),
+        business_timezone VARCHAR(100) DEFAULT 'Asia/Dubai',
+
         stripe_customer_id VARCHAR(255),
         subscription_status VARCHAR(50) DEFAULT 'free_trial',
         subscription_plan VARCHAR(50),
         subscription_end_date TIMESTAMP,
         trial_end_date TIMESTAMP,
+
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
 
+    // ==========================================
+    // BUSINESS SETTINGS
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS business_settings (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        reservation_mode VARCHAR(30) DEFAULT 'TABLES',
+
+        max_booking_advance_days INTEGER DEFAULT 30,
+        min_booking_notice_minutes INTEGER DEFAULT 120,
+
+        default_booking_duration_minutes INTEGER DEFAULT 90,
+
+        allow_table_combination BOOLEAN DEFAULT false,
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT business_settings_user_unique
+          UNIQUE (user_id)
+      );
+    `);
+
+    // ==========================================
+    // OPENING HOURS
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS opening_hours (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        day_of_week INTEGER NOT NULL,
+
+        is_open BOOLEAN DEFAULT true,
+
+        open_time TIME,
+        close_time TIME,
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT opening_hours_user_day_unique
+          UNIQUE (user_id, day_of_week)
+      );
+    `);
+
+    // ==========================================
+    // TABLE TYPES - RESTAURANTS
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS table_types (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        name VARCHAR(100) NOT NULL,
+
+        capacity INTEGER NOT NULL,
+
+        quantity INTEGER NOT NULL DEFAULT 1,
+
+        zone VARCHAR(100),
+
+        active BOOLEAN DEFAULT true,
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT table_types_capacity_positive
+          CHECK (capacity > 0),
+
+        CONSTRAINT table_types_quantity_positive
+          CHECK (quantity > 0)
+      );
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_table_types_user_id
+        ON table_types(user_id);
+    `);
+
+    // ==========================================
+    // SERVICES - SALONS / GENERIC SERVICES
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS services (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        name VARCHAR(255) NOT NULL,
+
+        description TEXT,
+
+        duration_minutes INTEGER NOT NULL DEFAULT 60,
+
+        price NUMERIC(10,2),
+
+        active BOOLEAN DEFAULT true,
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT services_duration_positive
+          CHECK (duration_minutes > 0)
+      );
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_services_user_id
+        ON services(user_id);
+    `);
+
+    // ==========================================
+    // STAFF - SALONS
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS staff (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        name VARCHAR(255) NOT NULL,
+
+        active BOOLEAN DEFAULT true,
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_staff_user_id
+        ON staff(user_id);
+    `);
+
+    // ==========================================
+    // BOOKINGS
+    // ==========================================
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS bookings (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id),
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
         customer_phone VARCHAR(50),
-        customer_name VARCHAR(255),
+
+        customer_name VARCHAR(255) NOT NULL,
+
+        people INTEGER,
+
+        service_id INTEGER
+          REFERENCES services(id)
+          ON DELETE SET NULL,
+
+        staff_id INTEGER
+          REFERENCES staff(id)
+          ON DELETE SET NULL,
+
+        table_type_id INTEGER
+          REFERENCES table_types(id)
+          ON DELETE SET NULL,
+
         booking_date DATE,
+
         booking_time TIME,
-        status VARCHAR(50) DEFAULT 'pending',
+
+        start_time TIME,
+
+        end_time TIME,
+
+        status VARCHAR(50) DEFAULT 'confirmed',
+
+        special_request TEXT,
+
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
 
+    // ==========================================
+    // MIGRATIONS FOR EXISTING BOOKINGS TABLE
+    // ==========================================
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS people INTEGER;
+    `);
+
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS service_id INTEGER
+      REFERENCES services(id)
+      ON DELETE SET NULL;
+    `);
+
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS staff_id INTEGER
+      REFERENCES staff(id)
+      ON DELETE SET NULL;
+    `);
+
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS table_type_id INTEGER
+      REFERENCES table_types(id)
+      ON DELETE SET NULL;
+    `);
+
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS start_time TIME;
+    `);
+
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS end_time TIME;
+    `);
+
+    await pool.query(`
+      ALTER TABLE bookings
+      ADD COLUMN IF NOT EXISTS special_request TEXT;
+    `);
+
+    // ==========================================
+    // MESSAGES
+    // ==========================================
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id),
+
+        user_id INTEGER
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
         phone VARCHAR(50),
+
         message_text TEXT,
+
         direction VARCHAR(20),
+
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
 
+    // ==========================================
+    // TEMPLATES
+    // ==========================================
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS templates (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id),
+
+        user_id INTEGER
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
         template_name VARCHAR(255),
+
         template_text TEXT,
+
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
 
+    // ==========================================
+    // STRIPE EVENTS
+    // ==========================================
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS stripe_events (
         id SERIAL PRIMARY KEY,
+
         event_id VARCHAR(255) UNIQUE,
+
         event_type VARCHAR(255),
+
         data JSONB,
+
         processed BOOLEAN DEFAULT false,
+
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
-      CREATE TABLE IF NOT EXISTS whatsapp_accounts (
-  id SERIAL PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-
-  phone_number VARCHAR(50) NOT NULL,
-  waba_id VARCHAR(255),
-  phone_number_id VARCHAR(255),
-  sender_id VARCHAR(255),
-  twilio_subaccount_sid VARCHAR(255),
-
-  status VARCHAR(50) DEFAULT 'pending',
-
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-  CONSTRAINT whatsapp_accounts_phone_unique
-    UNIQUE (phone_number),
-
-  CONSTRAINT whatsapp_accounts_user_phone_unique
-    UNIQUE (user_id, phone_number)
-);
-
-CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_user_id
-  ON whatsapp_accounts(user_id);
-
-CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_phone_number
-  ON whatsapp_accounts(phone_number);
-
-CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_waba_id
-  ON whatsapp_accounts(waba_id);
-
-CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_phone_number_id
-  ON whatsapp_accounts(phone_number_id);
     `);
+
+    // ==========================================
+    // WHATSAPP ACCOUNTS
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS whatsapp_accounts (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        phone_number VARCHAR(50) NOT NULL,
+
+        waba_id VARCHAR(255),
+
+        phone_number_id VARCHAR(255),
+
+        sender_id VARCHAR(255),
+
+        twilio_subaccount_sid VARCHAR(255),
+
+        status VARCHAR(50) DEFAULT 'pending',
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT whatsapp_accounts_phone_unique
+          UNIQUE (phone_number),
+
+        CONSTRAINT whatsapp_accounts_user_phone_unique
+          UNIQUE (user_id, phone_number)
+      );
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_user_id
+        ON whatsapp_accounts(user_id);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_phone_number
+        ON whatsapp_accounts(phone_number);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_waba_id
+        ON whatsapp_accounts(waba_id);
+    `);
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_accounts_phone_number_id
+        ON whatsapp_accounts(phone_number_id);
+    `);
+
+    // ==========================================
+    // DEFAULT BUSINESS SETTINGS
+    // ==========================================
+    await pool.query(`
+      INSERT INTO business_settings (user_id)
+      SELECT id
+      FROM users
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM business_settings bs
+        WHERE bs.user_id = users.id
+      );
+    `);
+
+    // ==========================================
+    // MIGRATE LEGACY WHATSAPP NUMBERS
+    // ==========================================
+    await pool.query(`
+      INSERT INTO whatsapp_accounts (
+        user_id,
+        phone_number,
+        status
+      )
+      SELECT
+        id,
+        REPLACE(whatsapp_number, 'whatsapp:', ''),
+        'connected'
+      FROM users
+      WHERE whatsapp_number IS NOT NULL
+        AND whatsapp_number <> ''
+      ON CONFLICT (phone_number) DO NOTHING;
+    `);
+
     console.log('✅ Database: Tables initialized');
+    console.log('✅ Database: Reservation architecture ready');
   } catch (err) {
-    console.error('DB Error:', err.message);
+    console.error('❌ DB Error:', err.message);
   }
 };
 
