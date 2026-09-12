@@ -12,129 +12,406 @@ class IntentHandler {
       console.log(`\n📱 Processing message from ${phoneNumber}`);
       console.log(`   Message: "${messageText}"`);
 
-      // 1. DETECT INTENT
-      const intent = await this.ai.detectIntent(messageText);
-      console.log(`🤖 Intent detected: ${intent}`);
+      // ============================================================
+      // 1. AI ANALYSIS - ONE AI CALL
+      // ============================================================
 
+      const timezone = user.business_timezone || 'Asia/Dubai';
+
+      const currentDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date());
+
+      const analysis = await this.ai.analyzeMessage(messageText, {
+        businessName: user.business_name,
+        timezone,
+        currentDate,
+      });
+
+      console.log(`🤖 AI Analysis:`);
+      console.log(JSON.stringify(analysis, null, 2));
+
+      const intent = analysis.intent;
+
+      // ============================================================
       // 2. ROUTE BY INTENT
+      // ============================================================
+
       let response;
       let bookingData = null;
 
       switch (intent) {
         case 'BOOKING':
-          response = await this.handleBookingIntent(user, messageText);
+          const bookingResult = await this.handleBookingIntent(
+            user,
+            phoneNumber,
+            messageText,
+            analysis,
+            timezone,
+            currentDate,
+          );
+
+          response = bookingResult.response;
+          bookingData = bookingResult.bookingData;
           break;
 
         case 'FAQ':
-          response = await this.handleFAQIntent(user, messageText);
+          response = await this.handleFAQIntent(user, messageText, analysis);
           break;
 
         case 'CANCEL':
-          response = await this.handleCancelIntent(user, messageText);
+          response = await this.handleCancelIntent(user, messageText, analysis);
           break;
 
         case 'MODIFY':
-          response = await this.handleModifyIntent(user, messageText);
+          response = await this.handleModifyIntent(user, messageText, analysis);
           break;
 
         case 'HUMAN':
-          response = await this.handleHumanIntent(user, messageText);
+          response = await this.handleHumanIntent(user, messageText, analysis);
+          break;
+
+        case 'GREETING':
+          response = await this.handleGreetingIntent(
+            user,
+            messageText,
+            analysis,
+          );
           break;
 
         default:
-          response = await this.ai.generateResponse('FAQ', messageText, {
-            businessName: user.business_name,
-          });
+          response = await this.generateAIResponse(user, messageText, analysis);
       }
 
-      console.log(`✅ Response: "${response.substring(0, 50)}..."`);
+      console.log(`✅ Response: "${response}"`);
 
-      return { intent, response, bookingData };
+      return {
+        intent,
+        response,
+        bookingData,
+        analysis,
+      };
     } catch (err) {
       console.error('Handle message error:', err.message);
+
       return {
         intent: 'ERROR',
         response: 'Sorry, I encountered an error. Please try again.',
         bookingData: null,
+        analysis: null,
       };
     }
   }
-  async handleBookingIntent(user, message) {
+
+  // ================================================================
+  // BOOKING
+  // ================================================================
+
+  async handleBookingIntent(
+    user,
+    phoneNumber,
+    message,
+    analysis,
+    timezone,
+    currentDate,
+  ) {
     try {
-      const details = await this.ai.extractBookingDetails(message);
-      console.log(`📅 Extracted details:`, details);
+      const entities = analysis.entities || {};
 
-      if (details.date && details.time && details.people) {
-        const isAvailable = await this.booking.checkAvailability(
-          details.date,
-          details.time,
-        );
+      let date = entities.date;
+      const dateReference = entities.date_reference;
 
-        if (isAvailable) {
-          const booking = await this.booking.createBooking(
-            user.id,
-            details.name || 'Guest',
-            details.phone || '',
-            details.date,
-            details.time,
-          );
+      const people = entities.people;
+      const time = entities.time;
+      const name = entities.name || 'Guest';
+      const phone = entities.phone || phoneNumber;
 
-          if (booking) {
-            // USE TWILIO APPROVED TEMPLATE!
-            // Format: "Your appointment is coming up on {{1}} at {{2}}"
-            const approvedResponse = `Your appointment is coming up on ${details.date} at ${details.time}. Confirmation #${booking.id}`;
+      console.log(`📅 Booking entities:`);
+      console.log(`   People: ${people}`);
+      console.log(`   Date: ${date}`);
+      console.log(`   Date reference: ${dateReference}`);
+      console.log(`   Time: ${time}`);
+      console.log(`   Name: ${name}`);
+      console.log(`   Phone: ${phone}`);
+      console.log(`   Special request: ${analysis.special_request}`);
 
-            return approvedResponse;
-          }
-        } else {
-          return `Sorry, that time slot is full. Would you like a different date or time?`;
-        }
+      // ============================================================
+      // Resolve semantic date reference
+      // ============================================================
+
+      if (!date && dateReference) {
+        date = this.resolveDateReference(dateReference, currentDate);
+
+        console.log(`📅 Resolved date: ${date}`);
       }
 
-      const missingFields = [];
-      if (!details.people) missingFields.push('number of people');
-      if (!details.date) missingFields.push('date');
-      if (!details.time) missingFields.push('time');
+      // ============================================================
+      // Check missing information
+      // ============================================================
 
-      return `Got it! Please also tell me the ${missingFields.join(', ')} for your booking.`;
+      const missingFields = [];
+
+      if (!people) {
+        missingFields.push('number of people');
+      }
+
+      if (!date) {
+        missingFields.push('date');
+      }
+
+      if (!time) {
+        missingFields.push('time');
+      }
+
+      if (missingFields.length > 0) {
+        return {
+          response: await this.generateMissingBookingResponse(
+            user,
+            message,
+            analysis,
+            missingFields,
+          ),
+          bookingData: null,
+        };
+      }
+
+      // ============================================================
+      // CHECK AVAILABILITY
+      // ============================================================
+
+      const isAvailable = await this.booking.checkAvailability(date, time);
+
+      if (!isAvailable) {
+        return {
+          response: await this.generateAIResponse(user, message, {
+            ...analysis,
+            booking_status: 'UNAVAILABLE',
+            booking_date: date,
+            booking_time: time,
+          }),
+          bookingData: null,
+        };
+      }
+
+      // ============================================================
+      // CREATE BOOKING
+      // ============================================================
+
+      const booking = await this.booking.createBooking(
+        user.id,
+        name,
+        phone,
+        date,
+        time,
+      );
+
+      if (!booking) {
+        return {
+          response: await this.generateAIResponse(user, message, {
+            ...analysis,
+            booking_status: 'FAILED',
+          }),
+          bookingData: null,
+        };
+      }
+
+      console.log(`✅ Booking created: #${booking.id}`);
+
+      // ============================================================
+      // BOOKING CONFIRMED
+      // ============================================================
+
+      const bookingData = {
+        id: booking.id,
+        people,
+        date,
+        time,
+        name,
+        phone,
+        special_request: analysis.special_request,
+      };
+
+      const response = await this.generateAIResponse(user, message, {
+        ...analysis,
+        booking_status: 'CONFIRMED',
+        booking: bookingData,
+      });
+
+      return {
+        response,
+        bookingData,
+      };
     } catch (err) {
       console.error('Booking intent error:', err.message);
-      return 'I had trouble processing your booking. Could you please provide: number of people, date, and time?';
+
+      return {
+        response: await this.generateAIResponse(user, message, {
+          ...analysis,
+          booking_status: 'ERROR',
+        }),
+        bookingData: null,
+      };
     }
   }
 
-  async handleFAQIntent(user, message) {
-    // Still use approved template format
-    return 'Your appointment is coming up on [date] at [time]';
+  // ================================================================
+  // FAQ
+  // ================================================================
+
+  async handleFAQIntent(user, message, analysis) {
+    return await this.generateAIResponse(user, message, analysis);
   }
 
-  async handleCancelIntent(user, message) {
-    // Use approved template format
-    return 'Your order #XYZ has been cancelled';
+  // ================================================================
+  // CANCEL
+  // ================================================================
+
+  async handleCancelIntent(user, message, analysis) {
+    return await this.generateAIResponse(user, message, analysis);
   }
 
-  async handleModifyIntent(user, message) {
-    try {
-      const response = await this.ai.generateResponse('FAQ', message, {
-        businessName: user.business_name,
-      });
-      return (
-        response +
-        '\n\nTo modify a booking, please cancel the current one and make a new reservation.'
-      );
-    } catch (err) {
-      console.error('Modify intent error:', err.message);
-      return 'To modify your booking, please cancel it and make a new reservation with your preferred date and time.';
+  // ================================================================
+  // MODIFY
+  // ================================================================
+
+  async handleModifyIntent(user, message, analysis) {
+    return await this.generateAIResponse(user, message, analysis);
+  }
+
+  // ================================================================
+  // HUMAN
+  // ================================================================
+
+  async handleHumanIntent(user, message, analysis) {
+    return await this.generateAIResponse(user, message, analysis);
+  }
+
+  // ================================================================
+  // GREETING
+  // ================================================================
+
+  async handleGreetingIntent(user, message, analysis) {
+    return await this.generateAIResponse(user, message, analysis);
+  }
+
+  // ================================================================
+  // GENERIC AI RESPONSE
+  // ================================================================
+
+  async generateAIResponse(user, message, analysis) {
+    const response = await this.ai.generateResponse(message, analysis, {
+      businessName: user.business_name,
+      businessType: user.business_type,
+      timezone: user.business_timezone || 'Asia/Dubai',
+    });
+
+    return (
+      response || 'Sorry, I could not process your request. Please try again.'
+    );
+  }
+
+  // ================================================================
+  // MISSING BOOKING INFORMATION
+  // ================================================================
+
+  async generateMissingBookingResponse(user, message, analysis, missingFields) {
+    return await this.generateAIResponse(user, message, {
+      ...analysis,
+      booking_status: 'MISSING_INFORMATION',
+      missing_fields: missingFields,
+    });
+  }
+
+  // ================================================================
+  // DATE RESOLUTION
+  //
+  // IMPORTANT:
+  // AI understands the customer's language.
+  // This function only performs deterministic date calculation.
+  // It does NOT translate Arabic/Darija/French.
+  //
+  // The AI already converts semantic references to English:
+  // "غدا", "بكرة", "tomorrow", "demain"
+  //                    ↓
+  //              "tomorrow"
+  // ================================================================
+
+  resolveDateReference(reference, currentDate) {
+    if (!reference || !currentDate) {
+      return null;
     }
+
+    const ref = reference.toLowerCase().trim();
+
+    // Parse current date as local calendar date
+    const [year, month, day] = currentDate.split('-').map(Number);
+
+    const baseDate = new Date(Date.UTC(year, month - 1, day));
+
+    // Today
+    if (ref === 'today' || ref === 'this day') {
+      return this.formatDate(baseDate);
+    }
+
+    // Tomorrow
+    if (ref === 'tomorrow' || ref === 'next day') {
+      baseDate.setUTCDate(baseDate.getUTCDate() + 1);
+
+      return this.formatDate(baseDate);
+    }
+
+    // Day after tomorrow
+    if (ref === 'day after tomorrow') {
+      baseDate.setUTCDate(baseDate.getUTCDate() + 2);
+
+      return this.formatDate(baseDate);
+    }
+
+    // Yesterday
+    if (ref === 'yesterday') {
+      baseDate.setUTCDate(baseDate.getUTCDate() - 1);
+
+      return this.formatDate(baseDate);
+    }
+
+    // Next weekday
+    const weekdays = {
+      sunday: 0,
+      monday: 1,
+      tuesday: 2,
+      wednesday: 3,
+      thursday: 4,
+      friday: 5,
+      saturday: 6,
+    };
+
+    const match = ref.match(
+      /^next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/,
+    );
+
+    if (match) {
+      const targetDay = weekdays[match[1]];
+      const currentDay = baseDate.getUTCDay();
+
+      let diff = targetDay - currentDay;
+
+      if (diff <= 0) {
+        diff += 7;
+      }
+
+      baseDate.setUTCDate(baseDate.getUTCDate() + diff);
+
+      return this.formatDate(baseDate);
+    }
+
+    return null;
   }
 
-  async handleHumanIntent(user, message) {
-    try {
-      return `I've escalated your request. A team member from ${user.business_name} will contact you shortly. Thank you for your patience! 👋`;
-    } catch (err) {
-      console.error('Human intent error:', err.message);
-      return 'Thank you for contacting us. A team member will help you shortly.';
-    }
+  formatDate(date) {
+    return date.toISOString().split('T')[0];
   }
 }
 
