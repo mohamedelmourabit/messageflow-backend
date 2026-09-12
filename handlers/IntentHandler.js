@@ -1,386 +1,876 @@
-// handlers/IntentHandler.js
+const AIService = require('../services/AIService');
 
 class IntentHandler {
-  constructor(aiService, whatsappService, bookingService) {
-    this.ai = aiService;
-    this.whatsapp = whatsappService;
-    this.booking = bookingService;
+  constructor(services) {
+    this.ai = services.ai;
+    this.booking = services.booking;
   }
 
-  async handleMessage(user, phoneNumber, messageText) {
+  // =========================================================
+  // MAIN MESSAGE HANDLER
+  // =========================================================
+
+  async handleMessage(user, phoneNumber, message) {
     try {
-      console.log(`\n📱 Processing message from ${phoneNumber}`);
-      console.log(`   Message: "${messageText}"`);
+      console.log('\n🧠 Analyzing message...');
+      console.log(`📩 ${message}`);
 
-      // ============================================================
-      // 1. AI ANALYSIS - ONE AI CALL
-      // ============================================================
-
-      const timezone = user.business_timezone || 'Asia/Dubai';
-
-      const currentDate = new Intl.DateTimeFormat('en-CA', {
-        timeZone: timezone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(new Date());
-
-      const analysis = await this.ai.analyzeMessage(messageText, {
+      const context = {
         businessName: user.business_name,
-        timezone,
-        currentDate,
-      });
+        businessType: user.business_type,
+        timezone: user.business_timezone || 'Asia/Dubai',
+      };
 
-      console.log(`🤖 AI Analysis:`);
-      console.log(JSON.stringify(analysis, null, 2));
+      // -----------------------------------------------------
+      // ONE AI CALL
+      // -----------------------------------------------------
+
+      const analysis = await this.ai.analyzeMessage(message, context);
+
+      console.log('🧠 AI analysis:', JSON.stringify(analysis, null, 2));
 
       const intent = analysis.intent;
 
-      // ============================================================
-      // 2. ROUTE BY INTENT
-      // ============================================================
-
-      let response;
-      let bookingData = null;
+      // -----------------------------------------------------
+      // ROUTE INTENT
+      // -----------------------------------------------------
 
       switch (intent) {
         case 'BOOKING':
-          const bookingResult = await this.handleBookingIntent(
-            user,
-            phoneNumber,
-            messageText,
-            analysis,
-            timezone,
-            currentDate,
-          );
-
-          response = bookingResult.response;
-          bookingData = bookingResult.bookingData;
-          break;
+          return await this.handleBooking(user, phoneNumber, message, analysis);
 
         case 'FAQ':
-          response = await this.handleFAQIntent(user, messageText, analysis);
-          break;
+          return await this.handleFAQ(user, phoneNumber, message, analysis);
 
         case 'CANCEL':
-          response = await this.handleCancelIntent(user, messageText, analysis);
-          break;
+          return await this.handleCancel(user, phoneNumber, message, analysis);
 
         case 'MODIFY':
-          response = await this.handleModifyIntent(user, messageText, analysis);
-          break;
+          return await this.handleModify(user, phoneNumber, message, analysis);
 
         case 'HUMAN':
-          response = await this.handleHumanIntent(user, messageText, analysis);
-          break;
+          return await this.handleHuman(user, phoneNumber, message, analysis);
 
         case 'GREETING':
-          response = await this.handleGreetingIntent(
+          return await this.handleGreeting(
             user,
-            messageText,
+            phoneNumber,
+            message,
             analysis,
           );
-          break;
 
         default:
-          response = await this.generateAIResponse(user, messageText, analysis);
+          return await this.generateAIResponse(
+            user,
+            phoneNumber,
+            message,
+            analysis,
+          );
       }
-
-      console.log(`✅ Response: "${response}"`);
-
-      return {
-        intent,
-        response,
-        bookingData,
-        analysis,
-      };
     } catch (err) {
-      console.error('Handle message error:', err.message);
+      console.error('IntentHandler error:', err.message);
 
       return {
-        intent: 'ERROR',
-        response: 'Sorry, I encountered an error. Please try again.',
-        bookingData: null,
-        analysis: null,
+        intent: 'OTHER',
+        response: 'Sorry, something went wrong. Please try again.',
       };
     }
   }
 
-  // ================================================================
+  // =========================================================
   // BOOKING
-  // ================================================================
+  // =========================================================
 
-  async handleBookingIntent(
-    user,
-    phoneNumber,
-    message,
-    analysis,
-    timezone,
-    currentDate,
-  ) {
+  async handleBooking(user, phoneNumber, message, analysis) {
     try {
       const entities = analysis.entities || {};
 
-      let date = entities.date;
-      const dateReference = entities.date_reference;
+      // -----------------------------------------------------
+      // BASIC DATA
+      // -----------------------------------------------------
 
-      const people = entities.people;
-      const time = entities.time;
-      const name = entities.name || 'Guest';
-      const phone = entities.phone || phoneNumber;
+      const businessType = String(user.business_type || '').toLowerCase();
 
-      console.log(`📅 Booking entities:`);
-      console.log(`   People: ${people}`);
-      console.log(`   Date: ${date}`);
-      console.log(`   Date reference: ${dateReference}`);
-      console.log(`   Time: ${time}`);
-      console.log(`   Name: ${name}`);
-      console.log(`   Phone: ${phone}`);
-      console.log(`   Special request: ${analysis.special_request}`);
+      const customerName = entities.name || entities.customer_name || null;
 
-      // ============================================================
-      // Resolve semantic date reference
-      // ============================================================
+      // IMPORTANT:
+      // Phone ALWAYS comes from WhatsApp.
+      const customerPhone = phoneNumber;
 
-      if (!date && dateReference) {
-        date = this.resolveDateReference(dateReference, currentDate);
-
-        console.log(`📅 Resolved date: ${date}`);
-      }
-
-      // ============================================================
-      // Check missing information
-      // ============================================================
-
-      const missingFields = [];
-
-      if (!people) {
-        missingFields.push('number of people');
-      }
-
-      if (!date) {
-        missingFields.push('date');
-      }
-
-      if (!time) {
-        missingFields.push('time');
-      }
-
-      if (missingFields.length > 0) {
-        return {
-          response: await this.generateMissingBookingResponse(
-            user,
-            message,
-            analysis,
-            missingFields,
-          ),
-          bookingData: null,
-        };
-      }
-
-      // ============================================================
-      // CHECK AVAILABILITY
-      // ============================================================
-
-      const isAvailable = await this.booking.checkAvailability(
-        user.id,
-        date,
-        time,
-      );
-      if (!isAvailable) {
-        return {
-          response: await this.generateAIResponse(user, message, {
-            ...analysis,
-            booking_status: 'UNAVAILABLE',
-            booking_date: date,
-            booking_time: time,
-          }),
-          bookingData: null,
-        };
-      }
-
-      // ============================================================
-      // CREATE BOOKING
-      // ============================================================
-
-      const booking = await this.booking.createBooking(
-        user.id,
-        name,
-        phone,
-        date,
-        time,
+      const people = this.toNumber(
+        entities.people || entities.guests || entities.party_size,
       );
 
-      if (!booking) {
+      let bookingDate = entities.date || null;
+
+      const dateReference =
+        entities.date_reference || entities.dateReference || null;
+
+      const bookingTime =
+        entities.time ||
+        entities.time_reference ||
+        entities.timeReference ||
+        null;
+
+      const specialRequest =
+        entities.special_request || analysis.special_request || null;
+
+      // -----------------------------------------------------
+      // RESOLVE DATE
+      // -----------------------------------------------------
+
+      if (!bookingDate && dateReference) {
+        bookingDate = this.resolveDateReference(
+          dateReference,
+          user.business_timezone || 'Asia/Dubai',
+        );
+      }
+
+      // -----------------------------------------------------
+      // REQUIRED: DATE
+      // -----------------------------------------------------
+
+      if (!bookingDate) {
         return {
-          response: await this.generateAIResponse(user, message, {
+          intent: 'BOOKING',
+          response: await this.generateAIResponse(user, phoneNumber, message, {
             ...analysis,
-            booking_status: 'FAILED',
+            missing_information: ['date'],
           }),
-          bookingData: null,
         };
       }
 
-      console.log(`✅ Booking created: #${booking.id}`);
+      // -----------------------------------------------------
+      // REQUIRED: TIME
+      // -----------------------------------------------------
 
-      // ============================================================
-      // BOOKING CONFIRMED
-      // ============================================================
+      if (!bookingTime) {
+        return {
+          intent: 'BOOKING',
+          response: await this.generateAIResponse(user, phoneNumber, message, {
+            ...analysis,
+            missing_information: ['time'],
+          }),
+        };
+      }
 
-      const bookingData = {
-        id: booking.id,
-        people,
-        date,
-        time,
-        name,
-        phone,
-        special_request: analysis.special_request,
-      };
+      // -----------------------------------------------------
+      // CUSTOMER NAME
+      // -----------------------------------------------------
 
-      const response = await this.generateAIResponse(user, message, {
-        ...analysis,
-        booking_status: 'CONFIRMED',
-        booking: bookingData,
-      });
+      if (!customerName) {
+        return {
+          intent: 'BOOKING',
+          response: await this.generateAIResponse(user, phoneNumber, message, {
+            ...analysis,
+            missing_information: ['name'],
+          }),
+        };
+      }
 
-      return {
-        response,
-        bookingData,
-      };
+      // =====================================================
+      // RESTAURANT
+      // =====================================================
+
+      if (
+        businessType.includes('restaurant') ||
+        businessType.includes('resto')
+      ) {
+        return await this.handleRestaurantBooking(
+          user,
+          phoneNumber,
+          message,
+          analysis,
+          {
+            customerName,
+            customerPhone,
+            people,
+            bookingDate,
+            bookingTime,
+            specialRequest,
+          },
+        );
+      }
+
+      // =====================================================
+      // SALON
+      // =====================================================
+
+      if (
+        businessType.includes('salon') ||
+        businessType.includes('hair') ||
+        businessType.includes('beauty') ||
+        businessType.includes('barber')
+      ) {
+        return await this.handleSalonBooking(
+          user,
+          phoneNumber,
+          message,
+          analysis,
+          {
+            customerName,
+            customerPhone,
+            bookingDate,
+            bookingTime,
+            specialRequest,
+          },
+        );
+      }
+
+      // =====================================================
+      // GENERIC SERVICE / SLOT
+      // =====================================================
+
+      return await this.handleGenericBooking(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+        {
+          customerName,
+          customerPhone,
+          people,
+          bookingDate,
+          bookingTime,
+          specialRequest,
+        },
+      );
     } catch (err) {
-      console.error('Booking intent error:', err.message);
+      console.error('Handle booking error:', err.message);
 
       return {
-        response: await this.generateAIResponse(user, message, {
-          ...analysis,
-          booking_status: 'ERROR',
-        }),
-        bookingData: null,
+        intent: 'BOOKING',
+        response: 'Sorry, I could not process your booking right now.',
       };
     }
   }
 
-  // ================================================================
-  // FAQ
-  // ================================================================
+  // =========================================================
+  // RESTAURANT BOOKING
+  // =========================================================
 
-  async handleFAQIntent(user, message, analysis) {
-    return await this.generateAIResponse(user, message, analysis);
-  }
+  async handleRestaurantBooking(user, phoneNumber, message, analysis, data) {
+    const {
+      customerName,
+      customerPhone,
+      people,
+      bookingDate,
+      bookingTime,
+      specialRequest,
+    } = data;
 
-  // ================================================================
-  // CANCEL
-  // ================================================================
+    // -----------------------------------------------------
+    // RESTAURANT REQUIRES NUMBER OF PEOPLE
+    // -----------------------------------------------------
 
-  async handleCancelIntent(user, message, analysis) {
-    return await this.generateAIResponse(user, message, analysis);
-  }
+    if (!people) {
+      return {
+        intent: 'BOOKING',
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+          missing_information: ['people'],
+        }),
+      };
+    }
 
-  // ================================================================
-  // MODIFY
-  // ================================================================
+    // -----------------------------------------------------
+    // GET BUSINESS SETTINGS
+    // -----------------------------------------------------
 
-  async handleModifyIntent(user, message, analysis) {
-    return await this.generateAIResponse(user, message, analysis);
-  }
+    const settings = await this.booking.getBusinessSettings(user.id);
 
-  // ================================================================
-  // HUMAN
-  // ================================================================
+    const duration = Number(settings.default_booking_duration_minutes || 90);
 
-  async handleHumanIntent(user, message, analysis) {
-    return await this.generateAIResponse(user, message, analysis);
-  }
+    const endTime = this.booking.calculateEndTime(bookingTime, duration);
 
-  // ================================================================
-  // GREETING
-  // ================================================================
+    // -----------------------------------------------------
+    // OPTIONAL ZONE
+    // -----------------------------------------------------
 
-  async handleGreetingIntent(user, message, analysis) {
-    return await this.generateAIResponse(user, message, analysis);
-  }
+    const requestedZone = this.extractZone(analysis);
 
-  // ================================================================
-  // GENERIC AI RESPONSE
-  // ================================================================
+    // -----------------------------------------------------
+    // CHECK TABLE
+    // -----------------------------------------------------
 
-  async generateAIResponse(user, message, analysis) {
-    const response = await this.ai.generateResponse(message, analysis, {
-      businessName: user.business_name,
-      businessType: user.business_type,
-      timezone: user.business_timezone || 'Asia/Dubai',
-    });
-
-    return (
-      response || 'Sorry, I could not process your request. Please try again.'
+    const availability = await this.booking.checkRestaurantAvailability(
+      user.id,
+      bookingDate,
+      bookingTime,
+      endTime,
+      people,
+      requestedZone,
     );
+
+    if (!availability.available) {
+      return {
+        intent: 'BOOKING',
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+          booking_available: false,
+          availability_reason: availability.reason,
+        }),
+      };
+    }
+
+    // -----------------------------------------------------
+    // CREATE BOOKING
+    // -----------------------------------------------------
+
+    const result = await this.booking.createBooking(
+      user.id,
+      customerName,
+      customerPhone,
+      people,
+      bookingDate,
+      bookingTime,
+      {
+        endTime,
+        tableTypeId: availability.tableType?.id || null,
+        specialRequest,
+      },
+    );
+
+    if (!result.success) {
+      return {
+        intent: 'BOOKING',
+        response: 'Sorry, I could not confirm your booking.',
+      };
+    }
+
+    // -----------------------------------------------------
+    // CONFIRMED
+    // -----------------------------------------------------
+
+    return {
+      intent: 'BOOKING',
+      response: await this.generateAIResponse(user, phoneNumber, message, {
+        ...analysis,
+        booking_available: true,
+        booking_confirmed: true,
+        booking: {
+          id: result.booking.id,
+          date: bookingDate,
+          time: bookingTime,
+          end_time: endTime,
+          people,
+          table_type: availability.tableType?.name || null,
+        },
+      }),
+      booking: result.booking,
+    };
   }
 
-  // ================================================================
-  // MISSING BOOKING INFORMATION
-  // ================================================================
+  // =========================================================
+  // SALON BOOKING
+  // =========================================================
 
-  async generateMissingBookingResponse(user, message, analysis, missingFields) {
-    return await this.generateAIResponse(user, message, {
-      ...analysis,
-      booking_status: 'MISSING_INFORMATION',
-      missing_fields: missingFields,
-    });
+  async handleSalonBooking(user, phoneNumber, message, analysis, data) {
+    const {
+      customerName,
+      customerPhone,
+      bookingDate,
+      bookingTime,
+      specialRequest,
+    } = data;
+
+    const entities = analysis.entities || {};
+
+    // -----------------------------------------------------
+    // SERVICE
+    // -----------------------------------------------------
+
+    const requestedService =
+      entities.service || entities.service_name || entities.serviceName || null;
+
+    // -----------------------------------------------------
+    // STAFF
+    // -----------------------------------------------------
+
+    const requestedStaff =
+      entities.staff || entities.staff_name || entities.staffName || null;
+
+    // -----------------------------------------------------
+    // RESOLVE SERVICE ID
+    //
+    // If AI understood the requested service,
+    // find the actual DB service.
+    //
+    // If no service was mentioned:
+    // serviceId remains null.
+    // findBestSalonAvailability() will try
+    // configured services automatically.
+    // -----------------------------------------------------
+
+    let serviceId = null;
+
+    if (requestedService) {
+      serviceId = await this.findServiceId(user.id, requestedService);
+
+      // AI mentioned a service but DB doesn't contain it.
+      if (!serviceId) {
+        return {
+          intent: 'BOOKING',
+          response: await this.generateAIResponse(user, phoneNumber, message, {
+            ...analysis,
+            missing_information: ['service'],
+            service_not_found: requestedService,
+          }),
+        };
+      }
+    }
+
+    // -----------------------------------------------------
+    // RESOLVE STAFF ID
+    // -----------------------------------------------------
+
+    let staffId = null;
+
+    if (requestedStaff) {
+      staffId = await this.findStaffId(user.id, requestedStaff);
+
+      if (!staffId) {
+        return {
+          intent: 'BOOKING',
+          response: await this.generateAIResponse(user, phoneNumber, message, {
+            ...analysis,
+            staff_not_found: requestedStaff,
+          }),
+        };
+      }
+    }
+
+    // -----------------------------------------------------
+    // AUTOMATIC SERVICE + STAFF SELECTION
+    //
+    // This is the important part.
+    //
+    // Example:
+    //
+    // "I want an appointment tomorrow at 18h"
+    //
+    // serviceId = null
+    // staffId   = null
+    //
+    // BookingService searches:
+    //
+    // service 1 → staff 1 ❌
+    // service 1 → staff 2 ❌
+    // service 2 → staff 1 ✅
+    //
+    // -----------------------------------------------------
+
+    const availability = await this.booking.findBestSalonAvailability(
+      user.id,
+      bookingDate,
+      bookingTime,
+      serviceId,
+      staffId,
+    );
+
+    if (!availability.available) {
+      return {
+        intent: 'BOOKING',
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+          booking_available: false,
+          availability_reason: availability.reason,
+        }),
+      };
+    }
+
+    const selectedService = availability.service;
+
+    const selectedStaff = availability.staff;
+
+    const endTime = availability.endTime;
+
+    // -----------------------------------------------------
+    // CREATE BOOKING
+    // -----------------------------------------------------
+
+    const result = await this.booking.createBooking(
+      user.id,
+      customerName,
+      customerPhone,
+      1,
+      bookingDate,
+      bookingTime,
+      {
+        endTime,
+        serviceId: selectedService?.id || null,
+        staffId: selectedStaff?.id || null,
+        specialRequest,
+      },
+    );
+
+    if (!result.success) {
+      return {
+        intent: 'BOOKING',
+        response: 'Sorry, I could not confirm your appointment.',
+      };
+    }
+
+    // -----------------------------------------------------
+    // CONFIRMED
+    // -----------------------------------------------------
+
+    return {
+      intent: 'BOOKING',
+      response: await this.generateAIResponse(user, phoneNumber, message, {
+        ...analysis,
+        booking_available: true,
+        booking_confirmed: true,
+        booking: {
+          id: result.booking.id,
+          date: bookingDate,
+          time: bookingTime,
+          end_time: endTime,
+          service: selectedService?.name || null,
+          staff: selectedStaff?.name || null,
+        },
+      }),
+      booking: result.booking,
+    };
   }
 
-  // ================================================================
-  // DATE RESOLUTION
-  //
-  // IMPORTANT:
-  // AI understands the customer's language.
-  // This function only performs deterministic date calculation.
-  // It does NOT translate Arabic/Darija/French.
-  //
-  // The AI already converts semantic references to English:
-  // "غدا", "بكرة", "tomorrow", "demain"
-  //                    ↓
-  //              "tomorrow"
-  // ================================================================
+  // =========================================================
+  // GENERIC SERVICE / SLOT
+  // =========================================================
 
-  resolveDateReference(reference, currentDate) {
-    if (!reference || !currentDate) {
+  async handleGenericBooking(user, phoneNumber, message, analysis, data) {
+    const {
+      customerName,
+      customerPhone,
+      people,
+      bookingDate,
+      bookingTime,
+      specialRequest,
+    } = data;
+
+    const settings = await this.booking.getBusinessSettings(user.id);
+
+    const duration = Number(settings.default_booking_duration_minutes || 60);
+
+    const endTime = this.booking.calculateEndTime(bookingTime, duration);
+
+    const availability = await this.booking.checkSlotAvailability(
+      user.id,
+      bookingDate,
+      bookingTime,
+      endTime,
+    );
+
+    if (!availability.available) {
+      return {
+        intent: 'BOOKING',
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+          booking_available: false,
+          availability_reason: 'NO_SLOT_AVAILABLE',
+        }),
+      };
+    }
+
+    const result = await this.booking.createBooking(
+      user.id,
+      customerName,
+      customerPhone,
+      people || 1,
+      bookingDate,
+      bookingTime,
+      {
+        endTime,
+        specialRequest,
+      },
+    );
+
+    if (!result.success) {
+      return {
+        intent: 'BOOKING',
+        response: 'Sorry, I could not confirm your booking.',
+      };
+    }
+
+    return {
+      intent: 'BOOKING',
+      response: await this.generateAIResponse(user, phoneNumber, message, {
+        ...analysis,
+        booking_available: true,
+        booking_confirmed: true,
+        booking: {
+          id: result.booking.id,
+          date: bookingDate,
+          time: bookingTime,
+          end_time: endTime,
+        },
+      }),
+      booking: result.booking,
+    };
+  }
+
+  // =========================================================
+  // FIND SERVICE
+  // =========================================================
+
+  async findServiceId(userId, serviceName) {
+    try {
+      const services = await this.booking.getServices(userId);
+
+      if (!serviceName) {
+        return null;
+      }
+
+      const wanted = String(serviceName).trim().toLowerCase();
+
+      // Exact match first
+      const exact = services.find(
+        (service) => String(service.name).trim().toLowerCase() === wanted,
+      );
+
+      if (exact) {
+        return exact.id;
+      }
+
+      // Then substring match
+      const partial = services.find((service) => {
+        const name = String(service.name).trim().toLowerCase();
+
+        return name.includes(wanted) || wanted.includes(name);
+      });
+
+      return partial?.id || null;
+    } catch (err) {
+      console.error('Find service error:', err.message);
+
+      return null;
+    }
+  }
+
+  // =========================================================
+  // FIND STAFF
+  // =========================================================
+
+  async findStaffId(userId, staffName) {
+    try {
+      const staff = await this.booking.getStaff(userId);
+
+      if (!staffName) {
+        return null;
+      }
+
+      const wanted = String(staffName).trim().toLowerCase();
+
+      const exact = staff.find(
+        (employee) => String(employee.name).trim().toLowerCase() === wanted,
+      );
+
+      if (exact) {
+        return exact.id;
+      }
+
+      const partial = staff.find((employee) => {
+        const name = String(employee.name).trim().toLowerCase();
+
+        return name.includes(wanted) || wanted.includes(name);
+      });
+
+      return partial?.id || null;
+    } catch (err) {
+      console.error('Find staff error:', err.message);
+
+      return null;
+    }
+  }
+
+  // =========================================================
+  // ZONE
+  // =========================================================
+
+  extractZone(analysis) {
+    const entities = analysis.entities || {};
+
+    return entities.zone || entities.requested_zone || entities.area || null;
+  }
+
+  // =========================================================
+  // FAQ
+  // =========================================================
+
+  async handleFAQ(user, phoneNumber, message, analysis) {
+    return {
+      intent: 'FAQ',
+      response: await this.generateAIResponse(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+      ),
+    };
+  }
+
+  // =========================================================
+  // CANCEL
+  // =========================================================
+
+  async handleCancel(user, phoneNumber, message, analysis) {
+    return {
+      intent: 'CANCEL',
+      response: await this.generateAIResponse(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+      ),
+    };
+  }
+
+  // =========================================================
+  // MODIFY
+  // =========================================================
+
+  async handleModify(user, phoneNumber, message, analysis) {
+    return {
+      intent: 'MODIFY',
+      response: await this.generateAIResponse(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+      ),
+    };
+  }
+
+  // =========================================================
+  // HUMAN
+  // =========================================================
+
+  async handleHuman(user, phoneNumber, message, analysis) {
+    return {
+      intent: 'HUMAN',
+      response: await this.generateAIResponse(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+      ),
+    };
+  }
+
+  // =========================================================
+  // GREETING
+  // =========================================================
+
+  async handleGreeting(user, phoneNumber, message, analysis) {
+    return {
+      intent: 'GREETING',
+      response: await this.generateAIResponse(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+      ),
+    };
+  }
+
+  // =========================================================
+  // AI RESPONSE
+  // =========================================================
+
+  async generateAIResponse(user, phoneNumber, message, analysis) {
+    try {
+      return await this.ai.generateResponse(message, analysis, {
+        businessName: user.business_name,
+
+        businessType: user.business_type,
+
+        timezone: user.business_timezone || 'Asia/Dubai',
+      });
+    } catch (err) {
+      console.error('Generate AI response error:', err.message);
+
+      return 'Sorry, I could not process your request.';
+    }
+  }
+
+  // =========================================================
+  // NUMBER HELPER
+  // =========================================================
+
+  toNumber(value) {
+    if (value === null || value === undefined || value === '') {
       return null;
     }
 
-    const ref = reference.toLowerCase().trim();
+    const number = Number(value);
 
-    // Parse current date as local calendar date
-    const [year, month, day] = currentDate.split('-').map(Number);
+    return Number.isFinite(number) ? number : null;
+  }
 
-    const baseDate = new Date(Date.UTC(year, month - 1, day));
+  // =========================================================
+  // DATE RESOLUTION
+  // =========================================================
 
-    // Today
-    if (ref === 'today' || ref === 'this day') {
-      return this.formatDate(baseDate);
+  resolveDateReference(reference, timezone = 'Asia/Dubai') {
+    if (!reference) {
+      return null;
     }
 
-    // Tomorrow
+    const ref = String(reference).trim().toLowerCase();
+
+    // -----------------------------------------------------
+    // Current date in business timezone
+    // -----------------------------------------------------
+
+    const now = new Date();
+
+    const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    const todayString = dateFormatter.format(now);
+
+    const today = new Date(`${todayString}T12:00:00`);
+
+    // -----------------------------------------------------
+    // Semantic references normalized by AI
+    // -----------------------------------------------------
+
+    if (ref === 'today' || ref === 'same day') {
+      return this.formatDate(today);
+    }
+
     if (ref === 'tomorrow' || ref === 'next day') {
-      baseDate.setUTCDate(baseDate.getUTCDate() + 1);
+      const date = new Date(today);
+      date.setDate(date.getDate() + 1);
 
-      return this.formatDate(baseDate);
+      return this.formatDate(date);
     }
 
-    // Day after tomorrow
     if (ref === 'day after tomorrow') {
-      baseDate.setUTCDate(baseDate.getUTCDate() + 2);
+      const date = new Date(today);
+      date.setDate(date.getDate() + 2);
 
-      return this.formatDate(baseDate);
+      return this.formatDate(date);
     }
 
-    // Yesterday
     if (ref === 'yesterday') {
-      baseDate.setUTCDate(baseDate.getUTCDate() - 1);
+      const date = new Date(today);
+      date.setDate(date.getDate() - 1);
 
-      return this.formatDate(baseDate);
+      return this.formatDate(date);
     }
 
-    // Next weekday
+    // -----------------------------------------------------
+    // "next monday", "next friday", etc.
+    //
+    // AI should normalize Arabic / Darija / French /
+    // Gulf Arabic into this semantic representation.
+    // -----------------------------------------------------
+
     const weekdays = {
       sunday: 0,
       monday: 1,
@@ -392,29 +882,50 @@ class IntentHandler {
     };
 
     const match = ref.match(
-      /^next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/,
+      /^(?:next\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/,
     );
 
     if (match) {
-      const targetDay = weekdays[match[1]];
-      const currentDay = baseDate.getUTCDay();
+      const target = weekdays[match[1]];
 
-      let diff = targetDay - currentDay;
+      const current = today.getDay();
 
-      if (diff <= 0) {
-        diff += 7;
+      let diff = (target - current + 7) % 7;
+
+      if (diff === 0) {
+        diff = 7;
       }
 
-      baseDate.setUTCDate(baseDate.getUTCDate() + diff);
+      const date = new Date(today);
 
-      return this.formatDate(baseDate);
+      date.setDate(date.getDate() + diff);
+
+      return this.formatDate(date);
+    }
+
+    // -----------------------------------------------------
+    // Already normalized YYYY-MM-DD
+    // -----------------------------------------------------
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ref)) {
+      return ref;
     }
 
     return null;
   }
 
+  // =========================================================
+  // FORMAT DATE
+  // =========================================================
+
   formatDate(date) {
-    return date.toISOString().split('T')[0];
+    const year = date.getFullYear();
+
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+
+    const day = String(date.getDate()).padStart(2, '0');
+
+    return `${year}-${month}-${day}`;
   }
 }
 

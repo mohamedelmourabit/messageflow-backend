@@ -403,6 +403,10 @@ const initDb = async () => {
       ALTER TABLE bookings
       ADD COLUMN IF NOT EXISTS special_request TEXT;
     `);
+    await pool.query(`
+  ALTER TABLE business_settings
+  ADD COLUMN IF NOT EXISTS max_bookings_per_slot INTEGER DEFAULT 1;
+`);
 
     // ==========================================
     // MESSAGES
