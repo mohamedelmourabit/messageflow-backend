@@ -388,6 +388,110 @@ class BookingService {
   }
 
   // =========================================================
+  // RESTAURANT - ALTERNATIVE TIME SLOTS
+  // =========================================================
+
+  async findAlternativeRestaurantSlots(
+    userId,
+    bookingDate,
+    requestedTime,
+    people,
+    requestedZone = null,
+    limit = 5,
+  ) {
+    try {
+      if (!bookingDate || !requestedTime) return [];
+
+      const settings = await this.getBusinessSettings(userId);
+      const duration = Number(settings.default_booking_duration_minutes || 90);
+
+      // Respect configured opening hours when they exist.
+      const hoursResult = await this.db.query(
+        `SELECT open_time, close_time, is_open
+         FROM opening_hours
+         WHERE user_id = $1
+           AND day_of_week = EXTRACT(DOW FROM $2::date)::int
+         LIMIT 1`,
+        [userId, bookingDate],
+      );
+
+      const opening = hoursResult.rows[0];
+      if (!opening || opening.is_open !== true || !opening.open_time || !opening.close_time) {
+        return [];
+      }
+      const openingMinutes = this.timeToMinutes(opening.open_time);
+      const closingMinutes = this.timeToMinutes(opening.close_time);
+
+      const requestedMinutes = this.timeToMinutes(requestedTime);
+      if (requestedMinutes === null) return [];
+
+      const noticeMinutes = Number(settings.min_booking_notice_minutes || 0);
+      const advanceDays = Number(settings.max_booking_advance_days || 30);
+
+      // Never propose outside the business advance window.
+      const dateCheck = await this.db.query(
+        `SELECT ($1::date <= CURRENT_DATE + $2::integer) AS valid`,
+        [bookingDate, advanceDays],
+      );
+      if (!dateCheck.rows[0]?.valid) return [];
+
+      const candidates = [];
+      const seen = new Set();
+
+      // Search closest first: -30, +30, -60, +60, ...
+      for (let distance = 30; distance <= 12 * 60 && candidates.length < limit; distance += 30) {
+        for (const candidateMinutes of [requestedMinutes - distance, requestedMinutes + distance]) {
+          if (candidateMinutes < 0 || candidateMinutes >= 24 * 60) continue;
+          if (seen.has(candidateMinutes)) continue;
+          seen.add(candidateMinutes);
+
+          const endMinutes = candidateMinutes + duration;
+          if (openingMinutes !== null && candidateMinutes < openingMinutes) continue;
+          if (closingMinutes !== null && endMinutes > closingMinutes) continue;
+
+          const startTime = this.minutesToTime(candidateMinutes);
+          const endTime = this.calculateEndTime(startTime, duration);
+
+          if (noticeMinutes > 0) {
+            const noticeCheck = await this.db.query(
+              `SELECT (
+                ($1::date + $2::time)
+                >= NOW() + ($3::integer * INTERVAL '1 minute')
+              ) AS valid`,
+              [bookingDate, startTime, noticeMinutes],
+            );
+            if (!noticeCheck.rows[0]?.valid) continue;
+          }
+
+          const availability = await this.checkRestaurantAvailability(
+            userId,
+            bookingDate,
+            startTime,
+            endTime,
+            people,
+            requestedZone,
+          );
+
+          if (availability.available) {
+            candidates.push({
+              startTime,
+              endTime,
+              tableType: availability.tableType || null,
+            });
+          }
+
+          if (candidates.length >= limit) break;
+        }
+      }
+
+      return candidates;
+    } catch (err) {
+      console.error('Find alternative restaurant slots error:', err.message);
+      return [];
+    }
+  }
+
+  // =========================================================
   // SALON - CHECK STAFF
   // =========================================================
 

@@ -453,17 +453,23 @@ class IntentHandler {
       // SALON
       // -----------------------------------------------------
 
-      const configuredServices = await this.booking.getServices(user.id);
+      const [configuredServices, configuredStaff] = await Promise.all([
+        this.booking.getServices(user.id),
+        this.booking.getStaff(user.id),
+      ]);
       const isSalonBusiness =
         businessType.includes('salon') ||
         businessType.includes('hair') ||
         businessType.includes('beauty') ||
         businessType.includes('barber') ||
-        configuredServices.length > 0;
+        configuredServices.length > 0 ||
+        configuredStaff.length > 0;
 
-      // Active service records are a reliable business configuration signal.
-      // This protects the salon flow when a legacy business_type is blank or
-      // uses a label the routing code does not know.
+      // Active service or staff records are a reliable business configuration
+      // signal. This protects the salon flow (with its staff-aware alternative
+      // slot search) when a legacy business_type is blank, uses a label the
+      // routing code does not know, or the salon runs in staff-only MVP mode
+      // with no services configured yet.
       if (isSalonBusiness) {
         return await this.handleSalonBooking(
           user,
@@ -1351,6 +1357,32 @@ class IntentHandler {
       );
     }
 
+    // =====================================================
+    // RESTAURANT SLOT
+    // =====================================================
+
+    if (payload.startsWith('rslot:')) {
+      const selectedTime = payload.substring('rslot:'.length);
+      if (!/^\d{2}:\d{2}$/.test(selectedTime)) {
+        return null;
+      }
+
+      return await this.handleRestaurantBooking(
+        user,
+        phoneNumber,
+        message,
+        { entities: {} },
+        {
+          customerName: state.name || null,
+          customerPhone: phoneNumber,
+          people: state.people || null,
+          bookingDate: state.date,
+          bookingTime: selectedTime,
+          specialRequest: state.special_request || null,
+        },
+      );
+    }
+
     return null;
   }
 
@@ -1765,17 +1797,21 @@ class IntentHandler {
     );
 
     if (!availability.available) {
-      return {
-        intent: 'BOOKING',
-
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-
-          booking_available: false,
-
-          availability_reason: availability.reason,
-        }),
-      };
+      return await this.handleUnavailableRestaurantSlot(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+        {
+          bookingDate,
+          bookingTime,
+          people,
+          requestedZone,
+          customerName,
+          specialRequest,
+          reason: availability.reason,
+        },
+      );
     }
 
     // -----------------------------------------------------
@@ -1832,6 +1868,102 @@ class IntentHandler {
       }),
 
       booking: result.booking,
+    };
+  }
+
+  // =========================================================
+  // UNAVAILABLE RESTAURANT SLOT
+  // =========================================================
+
+  async handleUnavailableRestaurantSlot(
+    user,
+    phoneNumber,
+    message,
+    analysis,
+    data,
+  ) {
+    const {
+      bookingDate,
+      bookingTime,
+      people,
+      requestedZone,
+      customerName,
+      specialRequest,
+      reason,
+    } = data;
+
+    const state = await this.getConversationState(user.id, phoneNumber);
+
+    await this.saveConversationState(user.id, phoneNumber, {
+      ...state,
+      intent: 'BOOKING',
+      status: 'WAITING_FOR_SLOT',
+      name: customerName || state.name || null,
+      people,
+      date: bookingDate,
+      time: bookingTime,
+      special_request: specialRequest,
+    });
+
+    // A date-level constraint (too far ahead, too soon before the notice
+    // window) applies to the whole day, not just this time. No alternative
+    // time on the same date can fix it, so let the AI explain the rule
+    // instead of searching for one.
+    if (
+      reason !== 'NO_TABLE_AVAILABLE' &&
+      reason !== 'RESTAURANT_CAPACITY_REACHED'
+    ) {
+      return {
+        intent: 'BOOKING',
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+          booking_available: false,
+          availability_reason: reason,
+        }),
+      };
+    }
+
+    const alternatives = await this.booking.findAlternativeRestaurantSlots(
+      user.id,
+      bookingDate,
+      bookingTime,
+      people,
+      requestedZone,
+      5,
+    );
+
+    if (!alternatives.length) {
+      return {
+        intent: 'BOOKING',
+        // This is a real availability result, so wording is deterministic.
+        // Do not let AI manufacture an escalation or business instructions.
+        response:
+          'That time is not available, and I could not find another available time on that date. Please send another date or time you prefer.',
+      };
+    }
+
+    return {
+      intent: 'BOOKING',
+
+      response: `The requested time ${bookingTime} is not available. Please choose another time:`,
+
+      interactive: {
+        type: 'list',
+
+        body: `The requested time ${bookingTime} is not available. Please choose another time:`,
+
+        button: 'Choose a time',
+
+        items: alternatives.map((slot) => ({
+          id: `rslot:${slot.startTime}`,
+
+          item: slot.startTime,
+
+          description: slot.endTime
+            ? `Available until ${slot.endTime}`
+            : 'Available',
+        })),
+      },
     };
   }
 
