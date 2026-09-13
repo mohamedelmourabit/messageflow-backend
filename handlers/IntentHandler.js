@@ -1645,14 +1645,10 @@ class IntentHandler {
     if (!alternatives.length) {
       return {
         intent: 'BOOKING',
-
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-
-          booking_available: false,
-
-          availability_reason: 'NO_ALTERNATIVE_SLOT',
-        }),
+        // This is a real availability result, so wording is deterministic.
+        // Do not let AI manufacture an escalation or business instructions.
+        response:
+          'That time is not available, and I could not find another available time on that date. Please send another date or time you prefer.',
       };
     }
 
