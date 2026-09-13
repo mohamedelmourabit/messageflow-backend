@@ -120,7 +120,10 @@ class IntentHandler {
   async handleBooking(user, phoneNumber, message, analysis) {
     try {
       const entities = analysis.entities || {};
-      const conversationState = await this.getConversationState(user.id, phoneNumber);
+      const conversationState = await this.getConversationState(
+        user.id,
+        phoneNumber,
+      );
 
       // -----------------------------------------------------
       // BASIC DATA
@@ -129,14 +132,20 @@ class IntentHandler {
       const businessType = String(user.business_type || '').toLowerCase();
 
       const customerName =
-        entities.name || entities.customer_name || conversationState.name || null;
+        entities.name ||
+        entities.customer_name ||
+        conversationState.name ||
+        null;
 
       // IMPORTANT:
       // Phone ALWAYS comes from WhatsApp.
       const customerPhone = phoneNumber;
 
       const people = this.toNumber(
-        entities.people || entities.guests || entities.party_size || conversationState.people,
+        entities.people ||
+          entities.guests ||
+          entities.party_size ||
+          conversationState.people,
       );
 
       let bookingDate = entities.date || conversationState.date || null;
@@ -471,7 +480,11 @@ class IntentHandler {
 
     const currentState = await this.getConversationState(user.id, phoneNumber);
     const requestedStaff =
-      entities.staff || entities.staff_name || entities.staffName || currentState.staff || null;
+      entities.staff ||
+      entities.staff_name ||
+      entities.staffName ||
+      currentState.staff ||
+      null;
 
     // -----------------------------------------------------
     // RESOLVE SERVICE ID
@@ -605,7 +618,9 @@ class IntentHandler {
             items: alternatives.map((slot) => ({
               id: `slot:${slot.startTime}`,
               item: slot.startTime,
-              description: slot.endTime ? `Available until ${slot.endTime}` : 'Available',
+              description: slot.endTime
+                ? `Available until ${slot.endTime}`
+                : 'Available',
             })),
           },
         };
@@ -832,7 +847,8 @@ class IntentHandler {
     const values = {
       name: entities.name || entities.customer_name,
       people: entities.people || entities.guests || entities.party_size,
-      service: entities.service || entities.service_name || entities.serviceName,
+      service:
+        entities.service || entities.service_name || entities.serviceName,
       service_id: entities.service_id || entities.serviceId,
       staff: entities.staff || entities.staff_name || entities.staffName,
       staff_id: entities.staff_id || entities.staffId,
@@ -947,13 +963,15 @@ class IntentHandler {
       if (!alternatives.length) {
         return {
           intent: 'BOOKING',
-          response: 'That time is no longer available. Please choose another time.',
+          response:
+            'That time is no longer available. Please choose another time.',
         };
       }
 
       return {
         intent: 'BOOKING',
-        response: 'That time is no longer available. Please choose another time.',
+        response:
+          'That time is no longer available. Please choose another time.',
         interactive: {
           type: 'list',
           body: 'That time is no longer available. Please choose another time.',
@@ -961,7 +979,9 @@ class IntentHandler {
           items: alternatives.map((slot) => ({
             id: `slot:${slot.startTime}`,
             item: slot.startTime,
-            description: slot.endTime ? `Available until ${slot.endTime}` : 'Available',
+            description: slot.endTime
+              ? `Available until ${slot.endTime}`
+              : 'Available',
           })),
         },
       };
@@ -993,7 +1013,8 @@ class IntentHandler {
     if (!result.success) {
       return {
         intent: 'BOOKING',
-        response: 'Sorry, I could not confirm your appointment. Please choose another time.',
+        response:
+          'Sorry, I could not confirm your appointment. Please choose another time.',
       };
     }
 
@@ -1012,7 +1033,11 @@ class IntentHandler {
 
   async findServiceId(userId, serviceName) {
     try {
+      console.log('🔎 Services for user:', userId);
+
       const services = await this.booking.getServices(userId);
+
+      console.log('📋 Services from DB:', services);
 
       if (!serviceName) {
         return null;

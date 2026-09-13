@@ -11,14 +11,6 @@ class AIService {
 
   /**
    * Analyse complète d'un message WhatsApp en UN seul appel IA.
-   *
-   * L'IA comprend :
-   * - English
-   * - Arabic
-   * - Gulf Arabic / UAE
-   * - Moroccan Darija
-   * - French
-   * - messages multilingues
    */
   async analyzeMessage(message, context = {}) {
     try {
@@ -106,26 +98,38 @@ DATE RULES:
 If the customer clearly refers to a specific calendar date or weekday:
 - Resolve it using CURRENT DATE and BUSINESS TIMEZONE.
 - Return the resolved date as YYYY-MM-DD when possible.
-- Example: if today is Thursday and customer says "Monday", return the next Monday.
-- Example: "tomorrow" should be resolved to the actual YYYY-MM-DD date.
-- Example: "next Friday" should be resolved to the appropriate YYYY-MM-DD date.
-- date_reference may still contain the semantic meaning.
+- "tomorrow" must be resolved to the actual YYYY-MM-DD date.
+- "Monday" must be resolved to the appropriate upcoming Monday.
+- "next Friday" must be resolved to the appropriate YYYY-MM-DD date.
+- date_reference may still contain the original semantic meaning.
 
 TIME RULES:
+
 - "7pm" -> "19:00"
 - "8:30 PM" -> "20:30"
+- "1PM" -> "13:00"
 - "around 8" -> time_reference = "around 8", time = null
 - Never invent an exact time.
 
 SERVICE RULE:
-If the customer wants a service, identify the matching service from AVAILABLE SERVICES.
-Return the canonical service name exactly as provided in AVAILABLE SERVICES.
+
+If the customer wants a service:
+- Match it against AVAILABLE SERVICES.
+- Return the canonical service name exactly as provided in AVAILABLE SERVICES.
+- If the requested service does NOT exist in AVAILABLE SERVICES, return service = null.
+- NEVER invent a service.
+- NEVER replace a missing service with another service.
 
 STAFF RULE:
-If the customer explicitly requests a staff member, identify the matching staff member from AVAILABLE STAFF.
-Return the canonical staff name exactly as provided in AVAILABLE STAFF.
+
+If the customer explicitly requests a staff member:
+- Match it against AVAILABLE STAFF.
+- Return the canonical staff name exactly as provided in AVAILABLE STAFF.
+- If the requested staff member does NOT exist in AVAILABLE STAFF, return staff = null.
+- NEVER invent a staff member.
 
 BOOKING RULE:
+
 For a salon:
 - service is normally required
 - date is required
@@ -139,17 +143,28 @@ For a restaurant:
 - customer name is required
 
 PHONE:
+
 The customer's WhatsApp phone is already known by the backend.
 Do not ask for it.
 Only return phone if the customer explicitly provides another phone number.
 
-Return ONLY valid JSON.
+OUTPUT RULE:
+
+Return ONLY ONE valid JSON object.
+
+DO NOT:
+- add explanations
+- add markdown
+- add \`\`\`json
+- add text before the JSON
+- add text after the JSON
+- return multiple JSON objects
 
 Use exactly this structure:
 
 {
-  "language": "en|ar|fr|mixed|other",
-  "intent": "BOOKING|FAQ|CANCEL|MODIFY|HUMAN|GREETING|OTHER",
+  "language": "en",
+  "intent": "BOOKING",
   "confidence": 0.0,
   "entities": {
     "people": null,
@@ -200,21 +215,23 @@ Anything else.
 
 Do not confuse a booking follow-up with MODIFY.
 
-For example:
-Current state:
+Example:
+
+CURRENT STATE:
 {
   "intent": "BOOKING",
   "date": null
 }
 
-Customer:
+CUSTOMER:
 "Monday"
 
 Correct:
 {
   "intent": "BOOKING",
   "entities": {
-    "date": "2026-09-14"
+    "date": "YYYY-MM-DD",
+    "date_reference": "Monday"
   }
 }
 
@@ -222,14 +239,14 @@ NOT MODIFY.
 
 Another example:
 
-Current state:
+CURRENT STATE:
 {
   "intent": "BOOKING",
-  "service": "Manicure",
-  "date": null
+  "service": "Facial",
+  "date": "YYYY-MM-DD"
 }
 
-Customer:
+CUSTOMER:
 "6pm"
 
 Correct:
@@ -260,17 +277,87 @@ NOT MODIFY.
         throw new Error('Empty AI response');
       }
 
-      const cleaned = text
+      console.log('🤖 Claude raw response:', text);
+
+      /**
+       * Robust JSON extraction.
+       *
+       * Claude can occasionally return:
+       *
+       * {
+       *   ...
+       * }
+       * extra text
+       *
+       * Instead of JSON.parse() on the entire response,
+       * extract only the first complete JSON object.
+       */
+      let rawText = text
         .replace(/^```json\s*/i, '')
         .replace(/^```\s*/i, '')
         .replace(/\s*```$/i, '')
         .trim();
 
-      const analysis = JSON.parse(cleaned);
+      const firstBrace = rawText.indexOf('{');
+
+      if (firstBrace === -1) {
+        throw new Error(`Claude did not return a JSON object: ${rawText}`);
+      }
+
+      let depth = 0;
+      let end = -1;
+      let inString = false;
+      let escaped = false;
+
+      for (let i = firstBrace; i < rawText.length; i++) {
+        const char = rawText[i];
+
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+
+        if (char === '\\' && inString) {
+          escaped = true;
+          continue;
+        }
+
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+
+        if (inString) {
+          continue;
+        }
+
+        if (char === '{') {
+          depth++;
+        } else if (char === '}') {
+          depth--;
+
+          if (depth === 0) {
+            end = i + 1;
+            break;
+          }
+        }
+      }
+
+      if (end === -1) {
+        throw new Error(`Incomplete JSON from Claude: ${rawText}`);
+      }
+
+      const jsonText = rawText.substring(firstBrace, end);
+
+      console.log('🧩 JSON extracted:', jsonText);
+
+      const analysis = JSON.parse(jsonText);
+
+      console.log('✅ Parsed AI analysis:', JSON.stringify(analysis, null, 2));
 
       return this.normalizeAnalysis(analysis);
     } catch (error) {
-      console.error('AI analyzeMessage error:', error.message);
+      console.error('❌ AI analyzeMessage error:', error.message);
 
       return {
         language: 'en',
