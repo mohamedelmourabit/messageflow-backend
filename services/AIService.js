@@ -1,39 +1,40 @@
-const OpenAI = require('openai');
+const Anthropic = require('@anthropic-ai/sdk');
 
 class AIService {
-  constructor(apiKey, model = process.env.OPENAI_MODEL || 'gpt-4o-mini') {
-    this.openai = new OpenAI({ apiKey });
+  constructor(apiKey, model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001') {
+    this.client = new Anthropic({ apiKey });
     this.model = model;
   }
 
   async analyzeMessage(message, context = {}) {
     const today = this.dateInTimezone(context.timezone || 'Asia/Dubai');
-    const catalog = (context.availableServices || []).map(({ id, name, description }) => ({ id, name, description: description || null }));
+    const services = (context.availableServices || []).map(({ id, name, description }) => ({ id, name, description: description || null }));
     const staff = (context.availableStaff || []).map(({ id, name }) => ({ id, name }));
-    const prompt = `You interpret a WhatsApp message for a ${context.businessType || 'business'} booking system. Today in the business timezone (${context.timezone || 'Asia/Dubai'}) is ${today}.
-Return JSON only, matching this schema exactly:
+    const system = `Interpret WhatsApp messages for a ${context.businessType || 'business'} booking system. Today in ${context.timezone || 'Asia/Dubai'} is ${today}.
+Return ONLY valid JSON with this shape:
 {"intent":"BOOKING|FAQ|CANCEL|MODIFY|HUMAN|GREETING|OTHER","entities":{"name":null,"people":null,"service":null,"staff":null,"date":null,"time":null,"date_reference":null,"date_range":{"from":null,"to":null},"special_request":null},"faq_topic":null}
-Interpret meaning in English, French, Arabic, Gulf Arabic, Moroccan Darija, and mixed language. Do not use keyword matching; infer meaning. Use YYYY-MM-DD only for a specific requested day. For “next week”, “this weekend”, “later this month”, or any period, leave date null and return its inclusive real calendar range in date_range. Never turn a range into an arbitrary single day. Extract only fields stated or changed in this message; never invent services, staff, prices, facts, dates, times, or availability.
-Services actually configured: ${JSON.stringify(catalog)}
-Staff actually configured: ${JSON.stringify(staff)}
-Current conversation state: ${JSON.stringify(context.conversationState || {})}`;
+Understand English, French, Arabic, Gulf Arabic, Moroccan Darija, and mixed language semantically. Do not use keyword matching. Use YYYY-MM-DD only for a specific day. For a period such as next week, leave date null and return an inclusive date_range; never choose an arbitrary day. Extract only information stated or changed in this message. Never invent services, staff, prices, facts, dates, times, or availability.
+Configured services: ${JSON.stringify(services)}
+Configured staff: ${JSON.stringify(staff)}
+Conversation state: ${JSON.stringify(context.conversationState || {})}`;
     try {
-      const response = await this.openai.chat.completions.create({
+      const response = await this.client.messages.create({
         model: this.model,
+        max_tokens: 500,
         temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: prompt }, { role: 'user', content: String(message || '') }],
+        system,
+        messages: [{ role: 'user', content: String(message || '') }],
       });
-      return this.normalizeAnalysis(JSON.parse(response.choices[0].message.content));
+      return this.normalizeAnalysis(JSON.parse(this.text(response)));
     } catch (error) {
       console.error('AI analysis error:', error.message);
       return { intent: 'HUMAN', entities: {}, faq_topic: null };
     }
   }
 
-  // Natural-language wording only; the handler supplies all business facts.
+  // Claude writes wording only. The handler supplies every business fact.
   async generateResponse(message, analysis = {}, context = {}) {
-    const safeContext = {
+    const facts = {
       businessName: context.businessName || null,
       businessType: context.businessType || null,
       missing_information: analysis.missing_information || [],
@@ -44,19 +45,23 @@ Current conversation state: ${JSON.stringify(context.conversationState || {})}`;
       faq_answer: analysis.faq_answer || null,
       staff_not_found: analysis.staff_not_found || null,
     };
-    const prompt = `Write one short WhatsApp response in the customer's language when possible. Use only the facts in CONTEXT. Do not invent services, prices, opening hours, staff, availability, booking confirmation, or business information. If faq_answer is null, say that information is not available and offer human help. CONTEXT: ${JSON.stringify(safeContext)}`;
     try {
-      const response = await this.openai.chat.completions.create({
+      const response = await this.client.messages.create({
         model: this.model,
-        temperature: 0.2,
         max_tokens: 160,
-        messages: [{ role: 'system', content: prompt }, { role: 'user', content: String(message || '') }],
+        temperature: 0.2,
+        system: `Write one short WhatsApp response in the customer's language when possible. Use only FACTS. Never invent services, prices, opening hours, staff, availability, confirmation, or business information. If faq_answer is null, say the information is unavailable and offer human help. FACTS: ${JSON.stringify(facts)}`,
+        messages: [{ role: 'user', content: String(message || '') }],
       });
-      return response.choices[0].message.content?.trim();
+      return this.text(response) || 'Sorry, I could not process that right now. Please try again.';
     } catch (error) {
       console.error('AI response error:', error.message);
       return 'Sorry, I could not process that right now. Please try again.';
     }
+  }
+
+  text(response) {
+    return (response.content || []).filter((item) => item.type === 'text').map((item) => item.text).join('').trim().replace(/^```json\s*|\s*```$/g, '');
   }
 
   normalizeAnalysis(value) {
@@ -77,7 +82,6 @@ Current conversation state: ${JSON.stringify(context.conversationState || {})}`;
 
   validDate(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value); }
   validTime(value) { return typeof value === 'string' && /^\d{2}:\d{2}$/.test(value); }
-
   dateInTimezone(timezone) {
     const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
     const get = (type) => parts.find((part) => part.type === type)?.value;
