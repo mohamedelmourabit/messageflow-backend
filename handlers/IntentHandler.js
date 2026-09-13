@@ -141,10 +141,14 @@ class IntentHandler {
       // MERGE STATE
       // -----------------------------------------------------
 
-      const mergedState = this.mergeConversationState(
-        conversationState,
-        analysis,
-      );
+      // A semantically new booking must not inherit a service, name, or slot
+      // from an unfinished earlier booking. Only explicit follow-ups retain
+      // that state.
+      const stateToMerge =
+        analysis.intent === 'BOOKING' && analysis.booking_follow_up !== true
+          ? {}
+          : conversationState;
+      const mergedState = this.mergeConversationState(stateToMerge, analysis);
 
       await this.saveConversationState(user.id, phoneNumber, mergedState);
 

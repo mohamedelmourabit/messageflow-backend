@@ -761,9 +761,11 @@ class BookingService {
         [userId, date],
       );
       const opening = hoursResult.rows[0];
-      if (opening?.is_open !== false) {
-        const open = opening?.open_time ? this.timeToMinutes(opening.open_time) : 0;
-        const close = opening?.close_time ? this.timeToMinutes(opening.close_time) : 24 * 60;
+      // A range search must never manufacture business hours. Businesses need
+      // an opening-hours record before we can offer an exact time.
+      if (opening?.is_open === true && opening.open_time && opening.close_time) {
+        const open = this.timeToMinutes(opening.open_time);
+        const close = this.timeToMinutes(opening.close_time);
         for (let minutes = open; minutes + duration <= close && results.length < limit; minutes += 30) {
           const startTime = this.minutesToTime(minutes);
           if (Number(settings.min_booking_notice_minutes || 0) > 0) {
