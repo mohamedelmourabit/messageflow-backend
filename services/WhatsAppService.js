@@ -50,6 +50,62 @@ class WhatsAppService {
     }
   }
 
+  async sendInteractiveList(fromBusinessNumber, toPhone, options = {}) {
+    try {
+      const { body, button, items, language = 'en' } = options;
+
+      if (!body || !button || !Array.isArray(items) || !items.length) {
+        throw new Error('Invalid interactive list payload');
+      }
+
+      const from = fromBusinessNumber.startsWith('whatsapp:')
+        ? fromBusinessNumber
+        : `whatsapp:${fromBusinessNumber}`;
+
+      const to = toPhone.startsWith('whatsapp:')
+        ? toPhone
+        : `whatsapp:${toPhone}`;
+
+      // twilio/list-picker supports up to 10 items and is available
+      // for replies inside the 24-hour WhatsApp customer session.
+      const content = await this.twilio.content.v1.contents.create({
+        friendlyName: `messageflow_list_${Date.now()}`,
+        language,
+        types: {
+          'twilio/list-picker': {
+            body: String(body).substring(0, 1024),
+            button: String(button).substring(0, 20),
+            items: items.slice(0, 10).map((item) => ({
+              id: String(item.id).substring(0, 200),
+              item: String(item.item).substring(0, 24),
+              description: String(item.description || '').substring(0, 72),
+            })),
+          },
+        },
+      });
+
+      const message = await this.twilio.messages.create({
+        from,
+        to,
+        contentSid: content.sid,
+      });
+
+      console.log(`✅ Interactive list sent ${from} → ${to}: ${message.sid}`);
+
+      return {
+        success: true,
+        sid: message.sid,
+        contentSid: content.sid,
+      };
+    } catch (err) {
+      console.error('Send interactive list error:', err.message);
+      return {
+        success: false,
+        error: err.message,
+      };
+    }
+  }
+
   async sendMessage(fromBusinessNumber, toPhone, body) {
     try {
       const from = fromBusinessNumber.startsWith('whatsapp:')

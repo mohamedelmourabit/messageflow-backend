@@ -409,21 +409,6 @@ const initDb = async () => {
   ADD COLUMN IF NOT EXISTS max_bookings_per_slot INTEGER DEFAULT 1;
 `);
 
-    await pool.query(`
-  CREATE TABLE IF NOT EXISTS conversation_states (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    customer_phone VARCHAR(50) NOT NULL,
-    state JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT conversation_states_unique
-      UNIQUE (user_id, customer_phone)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_conversation_states_lookup
-    ON conversation_states(user_id, customer_phone);
-`);
     // ==========================================
     // MESSAGES
     // ==========================================
@@ -449,6 +434,19 @@ const initDb = async () => {
     // TEMPLATES
     // ==========================================
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS conversation_states (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        customer_phone VARCHAR(50) NOT NULL,
+        state JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT conversation_states_unique
+          UNIQUE (user_id, customer_phone)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_conversation_states_lookup
+        ON conversation_states(user_id, customer_phone);
+
       CREATE TABLE IF NOT EXISTS templates (
         id SERIAL PRIMARY KEY,
 
@@ -856,22 +854,41 @@ app.post('/whatsapp/webhook', async (req, res) => {
     await whatsappService.storeMessage(user.id, from, messageBody, 'incoming');
 
     // IA
-    const { intent, response } = await intentHandler.handleMessage(
+    const result = await intentHandler.handleMessage(
       user,
       from,
       messageBody,
+      {
+        buttonPayload: req.body.ButtonPayload || null,
+        buttonText: req.body.ButtonText || null,
+      },
     );
 
-    // Réponse depuis LE NUMÉRO DU RESTAURANT
-    const sent = await whatsappService.sendMessage(
-      user.phone_number,
-      from,
-      response,
-    );
+    const response = result?.response || '';
+    let sent;
+
+    if (result?.interactive?.type === 'list') {
+      sent = await whatsappService.sendInteractiveList(
+        user.phone_number,
+        from,
+        result.interactive,
+      );
+    } else {
+      sent = await whatsappService.sendMessage(
+        user.phone_number,
+        from,
+        response,
+      );
+    }
 
     // Historique
     if (sent.success) {
-      await whatsappService.storeMessage(user.id, from, response, 'outgoing');
+      await whatsappService.storeMessage(
+        user.id,
+        from,
+        response,
+        'outgoing',
+      );
     }
 
     res.send('OK');

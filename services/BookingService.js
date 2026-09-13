@@ -553,6 +553,144 @@ class BookingService {
   }
 
   // =========================================================
+  // SALON - ALTERNATIVE TIME SLOTS
+  // =========================================================
+
+  async findAlternativeSalonSlots(
+    userId,
+    bookingDate,
+    requestedTime,
+    serviceId,
+    requestedStaffId = null,
+    limit = 5,
+  ) {
+    try {
+      if (!bookingDate || !requestedTime || !serviceId) return [];
+
+      const serviceResult = await this.db.query(
+        `SELECT * FROM services
+         WHERE id = $1
+           AND user_id = $2
+           AND COALESCE(active, true) = true
+         LIMIT 1`,
+        [serviceId, userId],
+      );
+
+      const service = serviceResult.rows[0];
+      if (!service) return [];
+
+      const duration = Number(service.duration_minutes || 60);
+
+      // Respect configured opening hours when they exist.
+      const hoursResult = await this.db.query(
+        `SELECT open_time, close_time, is_open
+         FROM opening_hours
+         WHERE user_id = $1
+           AND day_of_week = EXTRACT(DOW FROM $2::date)::int
+         LIMIT 1`,
+        [userId, bookingDate],
+      );
+
+      const opening = hoursResult.rows[0];
+      const openingMinutes = opening?.is_open === false
+        ? null
+        : opening?.open_time
+          ? this.timeToMinutes(opening.open_time)
+          : 0;
+      const closingMinutes = opening?.is_open === false
+        ? null
+        : opening?.close_time
+          ? this.timeToMinutes(opening.close_time)
+          : 24 * 60;
+
+      if (opening?.is_open === false) return [];
+
+      const requestedMinutes = this.timeToMinutes(requestedTime);
+      if (requestedMinutes === null) return [];
+
+      const settings = await this.getBusinessSettings(userId);
+      const noticeMinutes = Number(settings.min_booking_notice_minutes || 0);
+      const advanceDays = Number(settings.max_booking_advance_days || 30);
+
+      // Never propose outside the business advance window.
+      const dateCheck = await this.db.query(
+        `SELECT ($1::date <= CURRENT_DATE + $2::integer) AS valid`,
+        [bookingDate, advanceDays],
+      );
+      if (!dateCheck.rows[0]?.valid) return [];
+
+      const candidates = [];
+      const seen = new Set();
+
+      // Search closest first: -30, +30, -60, +60, ...
+      for (let distance = 30; distance <= 12 * 60 && candidates.length < limit; distance += 30) {
+        for (const candidateMinutes of [requestedMinutes - distance, requestedMinutes + distance]) {
+          if (candidateMinutes < 0 || candidateMinutes >= 24 * 60) continue;
+          if (seen.has(candidateMinutes)) continue;
+          seen.add(candidateMinutes);
+
+          const endMinutes = candidateMinutes + duration;
+          if (openingMinutes !== null && candidateMinutes < openingMinutes) continue;
+          if (closingMinutes !== null && endMinutes > closingMinutes) continue;
+
+          const startTime = this.minutesToTime(candidateMinutes);
+          const endTime = this.calculateEndTime(startTime, duration);
+
+          if (noticeMinutes > 0) {
+            const noticeCheck = await this.db.query(
+              `SELECT (
+                ($1::date + $2::time)
+                >= NOW() + ($3::integer * INTERVAL '1 minute')
+              ) AS valid`,
+              [bookingDate, startTime, noticeMinutes],
+            );
+            if (!noticeCheck.rows[0]?.valid) continue;
+          }
+
+          const availability = await this.checkSalonAvailability(
+            userId,
+            bookingDate,
+            startTime,
+            endTime,
+            serviceId,
+            requestedStaffId,
+          );
+
+          if (availability.available) {
+            candidates.push({
+              startTime,
+              endTime,
+              staff: availability.staff,
+              service,
+            });
+          }
+
+          if (candidates.length >= limit) break;
+        }
+      }
+
+      return candidates;
+    } catch (err) {
+      console.error('Find alternative salon slots error:', err.message);
+      return [];
+    }
+  }
+
+  timeToMinutes(value) {
+    if (value === null || value === undefined) return null;
+    const text = String(value).slice(0, 5);
+    const [hours, minutes] = text.split(':').map(Number);
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    return hours * 60 + minutes;
+  }
+
+  minutesToTime(totalMinutes) {
+    const hours = Math.floor(totalMinutes / 60) % 24;
+    const minutes = totalMinutes % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
+
+  // =========================================================
   // GENERIC SLOT MODE
   // =========================================================
 
