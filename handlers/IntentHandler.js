@@ -418,12 +418,18 @@ class IntentHandler {
       // SALON
       // -----------------------------------------------------
 
-      if (
+      const configuredServices = await this.booking.getServices(user.id);
+      const isSalonBusiness =
         businessType.includes('salon') ||
         businessType.includes('hair') ||
         businessType.includes('beauty') ||
-        businessType.includes('barber')
-      ) {
+        businessType.includes('barber') ||
+        configuredServices.length > 0;
+
+      // Active service records are a reliable business configuration signal.
+      // This protects the salon flow when a legacy business_type is blank or
+      // uses a label the routing code does not know.
+      if (isSalonBusiness) {
         return await this.handleSalonBooking(
           user,
           phoneNumber,
