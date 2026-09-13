@@ -1,5 +1,3 @@
-const AIService = require('../services/AIService');
-
 class IntentHandler {
   constructor(services) {
     this.ai = services.ai;
@@ -17,15 +15,20 @@ class IntentHandler {
       console.log('\n🧠 Analyzing message...');
       console.log(`📩 ${message}`);
 
-      // A WhatsApp list/quick-reply click is deterministic.
-      // Do not waste an AI call: use the payload + saved state.
-      const buttonPayload = interaction.buttonPayload || null;
-      if (buttonPayload) {
+      // -----------------------------------------------------
+      // INTERACTIVE WHATSAPP SELECTION
+      // -----------------------------------------------------
+
+      const interactivePayload = this.extractInteractivePayload(interaction);
+
+      if (interactivePayload) {
+        console.log(`🎯 Interactive payload detected: ${interactivePayload}`);
+
         const selectedResult = await this.handleInteractiveSelection(
           user,
           phoneNumber,
           message,
-          buttonPayload,
+          interactivePayload,
         );
 
         if (selectedResult) {
@@ -33,13 +36,56 @@ class IntentHandler {
         }
       }
 
+      // -----------------------------------------------------
+      // LOAD CONVERSATION STATE
+      // -----------------------------------------------------
+
       const conversationState = await this.getConversationState(
         user.id,
         phoneNumber,
       );
 
+      // -----------------------------------------------------
+      // HANDLE WAITING STATES WITHOUT AI
+      // -----------------------------------------------------
+
+      if (conversationState.status === 'WAITING_FOR_SERVICE') {
+        const serviceResult = await this.handleServiceTextSelection(
+          user,
+          phoneNumber,
+          message,
+          conversationState,
+        );
+
+        if (serviceResult) {
+          return serviceResult;
+        }
+      }
+
+      if (conversationState.status === 'WAITING_FOR_SLOT') {
+        const slotResult = await this.handleSlotTextSelection(
+          user,
+          phoneNumber,
+          message,
+          conversationState,
+        );
+
+        if (slotResult) {
+          return slotResult;
+        }
+      }
+
+      // -----------------------------------------------------
+      // LOAD BUSINESS DATA
+      // -----------------------------------------------------
+
       const availableServices = await this.booking.getServices(user.id);
+
       const availableStaff = await this.booking.getStaff(user.id);
+
+      // -----------------------------------------------------
+      // AI CONTEXT
+      // -----------------------------------------------------
 
       const context = {
         businessName: user.business_name,
@@ -54,9 +100,15 @@ class IntentHandler {
       // ONE AI CALL
       // -----------------------------------------------------
 
+      console.log('🧠 Calling AI...');
+
       const analysis = await this.ai.analyzeMessage(message, context);
 
       console.log('🧠 AI analysis:', JSON.stringify(analysis, null, 2));
+
+      // -----------------------------------------------------
+      // MERGE STATE
+      // -----------------------------------------------------
 
       const mergedState = this.mergeConversationState(
         conversationState,
@@ -65,13 +117,11 @@ class IntentHandler {
 
       await this.saveConversationState(user.id, phoneNumber, mergedState);
 
-      const intent = analysis.intent;
-
       // -----------------------------------------------------
       // ROUTE INTENT
       // -----------------------------------------------------
 
-      switch (intent) {
+      switch (analysis.intent) {
         case 'BOOKING':
           return await this.handleBooking(user, phoneNumber, message, analysis);
 
@@ -104,7 +154,7 @@ class IntentHandler {
           );
       }
     } catch (err) {
-      console.error('IntentHandler error:', err.message);
+      console.error('❌ IntentHandler error:', err.message);
 
       return {
         intent: 'OTHER',
@@ -114,22 +164,102 @@ class IntentHandler {
   }
 
   // =========================================================
+  // INTERACTIVE PAYLOAD EXTRACTION
+  // =========================================================
+
+  extractInteractivePayload(interaction = {}) {
+    const directPayloads = [
+      interaction.buttonPayload,
+      interaction.listId,
+      interaction.payload,
+    ];
+
+    for (const value of directPayloads) {
+      if (
+        typeof value === 'string' &&
+        (value.startsWith('service:') || value.startsWith('slot:'))
+      ) {
+        return value;
+      }
+    }
+
+    // -----------------------------------------------------
+    // InteractiveData can be JSON or an object
+    // -----------------------------------------------------
+
+    let data = interaction.interactiveData;
+
+    if (!data) {
+      return null;
+    }
+
+    if (typeof data === 'string') {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        return null;
+      }
+    }
+
+    return this.findInteractivePayload(data);
+  }
+
+  findInteractivePayload(value) {
+    if (!value) {
+      return null;
+    }
+
+    if (typeof value === 'string') {
+      if (value.startsWith('service:') || value.startsWith('slot:')) {
+        return value;
+      }
+
+      return null;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const result = this.findInteractivePayload(item);
+
+        if (result) {
+          return result;
+        }
+      }
+
+      return null;
+    }
+
+    if (typeof value === 'object') {
+      for (const key of Object.keys(value)) {
+        const result = this.findInteractivePayload(value[key]);
+
+        if (result) {
+          return result;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // =========================================================
   // BOOKING
   // =========================================================
 
   async handleBooking(user, phoneNumber, message, analysis) {
     try {
       const entities = analysis.entities || {};
+
       const conversationState = await this.getConversationState(
         user.id,
         phoneNumber,
       );
 
-      // -----------------------------------------------------
-      // BASIC DATA
-      // -----------------------------------------------------
-
       const businessType = String(user.business_type || '').toLowerCase();
+
+      // -----------------------------------------------------
+      // CUSTOMER NAME
+      // -----------------------------------------------------
 
       const customerName =
         entities.name ||
@@ -137,9 +267,15 @@ class IntentHandler {
         conversationState.name ||
         null;
 
-      // IMPORTANT:
-      // Phone ALWAYS comes from WhatsApp.
+      // -----------------------------------------------------
+      // PHONE ALWAYS COMES FROM WHATSAPP
+      // -----------------------------------------------------
+
       const customerPhone = phoneNumber;
+
+      // -----------------------------------------------------
+      // PEOPLE
+      // -----------------------------------------------------
 
       const people = this.toNumber(
         entities.people ||
@@ -148,24 +284,14 @@ class IntentHandler {
           conversationState.people,
       );
 
+      // -----------------------------------------------------
+      // DATE
+      // -----------------------------------------------------
+
       let bookingDate = entities.date || conversationState.date || null;
 
       const dateReference =
         entities.date_reference || entities.dateReference || null;
-
-      const bookingTime =
-        entities.time ||
-        entities.time_reference ||
-        entities.timeReference ||
-        conversationState.time ||
-        null;
-
-      const specialRequest =
-        entities.special_request || analysis.special_request || null;
-
-      // -----------------------------------------------------
-      // RESOLVE DATE
-      // -----------------------------------------------------
 
       if (!bookingDate && dateReference) {
         bookingDate = this.resolveDateReference(
@@ -175,10 +301,32 @@ class IntentHandler {
       }
 
       // -----------------------------------------------------
-      // REQUIRED: DATE
+      // TIME
+      // -----------------------------------------------------
+
+      const bookingTime = entities.time || conversationState.time || null;
+
+      // -----------------------------------------------------
+      // SPECIAL REQUEST
+      // -----------------------------------------------------
+
+      const specialRequest =
+        entities.special_request ||
+        analysis.special_request ||
+        conversationState.special_request ||
+        null;
+
+      // -----------------------------------------------------
+      // DATE REQUIRED
       // -----------------------------------------------------
 
       if (!bookingDate) {
+        await this.saveConversationState(user.id, phoneNumber, {
+          ...conversationState,
+          intent: 'BOOKING',
+          status: 'WAITING_FOR_DATE',
+        });
+
         return {
           intent: 'BOOKING',
           response: await this.generateAIResponse(user, phoneNumber, message, {
@@ -189,10 +337,17 @@ class IntentHandler {
       }
 
       // -----------------------------------------------------
-      // REQUIRED: TIME
+      // TIME REQUIRED
       // -----------------------------------------------------
 
       if (!bookingTime) {
+        await this.saveConversationState(user.id, phoneNumber, {
+          ...conversationState,
+          intent: 'BOOKING',
+          status: 'WAITING_FOR_TIME',
+          date: bookingDate,
+        });
+
         return {
           intent: 'BOOKING',
           response: await this.generateAIResponse(user, phoneNumber, message, {
@@ -202,9 +357,9 @@ class IntentHandler {
         };
       }
 
-      // =====================================================
+      // -----------------------------------------------------
       // RESTAURANT
-      // =====================================================
+      // -----------------------------------------------------
 
       if (
         businessType.includes('restaurant') ||
@@ -226,9 +381,9 @@ class IntentHandler {
         );
       }
 
-      // =====================================================
+      // -----------------------------------------------------
       // SALON
-      // =====================================================
+      // -----------------------------------------------------
 
       if (
         businessType.includes('salon') ||
@@ -251,9 +406,9 @@ class IntentHandler {
         );
       }
 
-      // =====================================================
-      // GENERIC SERVICE / SLOT
-      // =====================================================
+      // -----------------------------------------------------
+      // GENERIC
+      // -----------------------------------------------------
 
       return await this.handleGenericBooking(
         user,
@@ -270,147 +425,13 @@ class IntentHandler {
         },
       );
     } catch (err) {
-      console.error('Handle booking error:', err.message);
+      console.error('❌ Handle booking error:', err.message);
 
       return {
         intent: 'BOOKING',
         response: 'Sorry, I could not process your booking right now.',
       };
     }
-  }
-
-  // =========================================================
-  // RESTAURANT BOOKING
-  // =========================================================
-
-  async handleRestaurantBooking(user, phoneNumber, message, analysis, data) {
-    const {
-      customerName,
-      customerPhone,
-      people,
-      bookingDate,
-      bookingTime,
-      specialRequest,
-    } = data;
-
-    // -----------------------------------------------------
-    // CUSTOMER NAME
-    // -----------------------------------------------------
-
-    if (!customerName) {
-      await this.saveConversationState(user.id, phoneNumber, {
-        ...(await this.getConversationState(user.id, phoneNumber)),
-        status: 'WAITING_FOR_NAME',
-        date: bookingDate,
-        time: bookingTime,
-      });
-
-      return {
-        intent: 'BOOKING',
-        response: 'What name should I use for the booking?',
-      };
-    }
-
-    // -----------------------------------------------------
-    // RESTAURANT REQUIRES NUMBER OF PEOPLE
-    // -----------------------------------------------------
-
-    if (!people) {
-      return {
-        intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          missing_information: ['people'],
-        }),
-      };
-    }
-
-    // -----------------------------------------------------
-    // GET BUSINESS SETTINGS
-    // -----------------------------------------------------
-
-    const settings = await this.booking.getBusinessSettings(user.id);
-
-    const duration = Number(settings.default_booking_duration_minutes || 90);
-
-    const endTime = this.booking.calculateEndTime(bookingTime, duration);
-
-    // -----------------------------------------------------
-    // OPTIONAL ZONE
-    // -----------------------------------------------------
-
-    const requestedZone = this.extractZone(analysis);
-
-    // -----------------------------------------------------
-    // CHECK TABLE
-    // -----------------------------------------------------
-
-    const availability = await this.booking.checkRestaurantAvailability(
-      user.id,
-      bookingDate,
-      bookingTime,
-      endTime,
-      people,
-      requestedZone,
-    );
-
-    if (!availability.available) {
-      return {
-        intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          booking_available: false,
-          availability_reason: availability.reason,
-        }),
-      };
-    }
-
-    // -----------------------------------------------------
-    // CREATE BOOKING
-    // -----------------------------------------------------
-
-    const result = await this.booking.createBooking(
-      user.id,
-      customerName,
-      customerPhone,
-      people,
-      bookingDate,
-      bookingTime,
-      {
-        endTime,
-        tableTypeId: availability.tableType?.id || null,
-        specialRequest,
-      },
-    );
-
-    if (!result.success) {
-      return {
-        intent: 'BOOKING',
-        response: 'Sorry, I could not confirm your booking.',
-      };
-    }
-
-    // -----------------------------------------------------
-    // CONFIRMED
-    // -----------------------------------------------------
-
-    return {
-      intent: 'BOOKING',
-      response: await this.generateAIResponse(user, phoneNumber, message, {
-        ...analysis,
-        booking_available: true,
-        booking_confirmed: true,
-        booking: {
-          id: result.booking.id,
-          date: bookingDate,
-          time: bookingTime,
-          end_time: endTime,
-          people,
-          table_type: availability.tableType?.name || null,
-        },
-      }),
-      booking: result.booking,
-    };
   }
 
   // =========================================================
@@ -428,23 +449,57 @@ class IntentHandler {
 
     const entities = analysis.entities || {};
 
+    const currentState = await this.getConversationState(user.id, phoneNumber);
+
     // -----------------------------------------------------
-    // SERVICE
+    // SERVICE FROM AI OR STATE
     // -----------------------------------------------------
 
     const requestedService =
       entities.service ||
       entities.service_name ||
       entities.serviceName ||
-      (await this.getConversationState(user.id, phoneNumber)).service ||
+      currentState.service ||
       null;
 
-    // -----------------------------------------------------
-    // SERVICE IS REQUIRED FOR A SALON
-    // Never auto-select a random service.
-    // -----------------------------------------------------
+    // =====================================================
+    // SERVICE IS REQUIRED
+    // =====================================================
+
     if (!requestedService) {
+      return await this.showAvailableServices(user, phoneNumber, currentState);
+    }
+
+    // =====================================================
+    // FIND REAL SERVICE IN DB
+    // =====================================================
+
+    const serviceId = await this.findServiceId(user.id, requestedService);
+
+    // -----------------------------------------------------
+    // SERVICE DOES NOT EXIST
+    // -----------------------------------------------------
+
+    if (!serviceId) {
       const services = await this.booking.getServices(user.id);
+
+      const nextState = {
+        ...currentState,
+        intent: 'BOOKING',
+        status: 'WAITING_FOR_SERVICE',
+
+        // Keep original requested value
+        // only as context.
+        requested_service: requestedService,
+
+        service: null,
+        service_id: null,
+
+        date: bookingDate,
+        time: bookingTime,
+      };
+
+      await this.saveConversationState(user.id, phoneNumber, nextState);
 
       if (!services.length) {
         return {
@@ -453,95 +508,43 @@ class IntentHandler {
         };
       }
 
-      await this.saveConversationState(user.id, phoneNumber, {
-        ...(await this.getConversationState(user.id, phoneNumber)),
-        status: 'WAITING_FOR_SERVICE',
-      });
+      const response = this.formatServiceList(
+        services,
+        `I don't currently offer ${requestedService}.\n\nPlease choose one of our available services:`,
+      );
 
       return {
         intent: 'BOOKING',
-        response: 'Please choose one of our available services.',
+        response,
+
         interactive: {
           type: 'list',
-          body: 'Please choose one of our available services.',
+
+          body: `I don't currently offer ${requestedService}.\n\nPlease choose one of our available services:`,
+
           button: 'Choose a service',
+
           items: services.slice(0, 10).map((service) => ({
             id: `service:${service.id}`,
+
             item: service.name,
-            description: `${service.duration_minutes} min${service.price != null ? ` • ${service.price}` : ''}`,
+
+            description: this.formatServiceDescription(service),
           })),
         },
       };
     }
 
-    // -----------------------------------------------------
+    // =====================================================
     // STAFF
-    // -----------------------------------------------------
+    // =====================================================
 
-    const currentState = await this.getConversationState(user.id, phoneNumber);
     const requestedStaff =
       entities.staff ||
       entities.staff_name ||
       entities.staffName ||
       currentState.staff ||
       null;
-
-    // -----------------------------------------------------
-    // RESOLVE SERVICE ID
-    //
-    // If AI understood the requested service,
-    // find the actual DB service.
-    //
-    // If no service was mentioned:
-    // serviceId remains null.
-    // findBestSalonAvailability() will try
-    // configured services automatically.
-    // -----------------------------------------------------
-
-    let serviceId = null;
-
-    if (requestedService) {
-      serviceId = await this.findServiceId(user.id, requestedService);
-
-      // AI mentioned a service but DB doesn't contain it.
-      if (!serviceId) {
-        const services = await this.booking.getServices(user.id);
-
-        await this.saveConversationState(user.id, phoneNumber, {
-          ...mergedState,
-          status: 'WAITING_FOR_SERVICE',
-          requested_service: requestedService,
-          service: null,
-          service_id: null,
-        });
-
-        if (!services.length) {
-          return {
-            intent: 'BOOKING',
-            response: 'Sorry, this business has no services configured yet.',
-          };
-        }
-
-        return {
-          intent: 'BOOKING',
-          response: `I don't currently offer ${requestedService}. Please choose one of our available services.`,
-          interactive: {
-            type: 'list',
-            body: `I don't currently offer ${requestedService}. Please choose one of our available services.`,
-            button: 'Choose a service',
-            items: services.slice(0, 10).map((service) => ({
-              id: `service:${service.id}`,
-              item: service.name,
-              description: `${service.duration_minutes} min${service.price != null ? ` • ${service.price}` : ''}`,
-            })),
-          },
-        };
-      }
-    }
-
-    // -----------------------------------------------------
-    // RESOLVE STAFF ID
-    // -----------------------------------------------------
 
     let staffId = null;
 
@@ -559,25 +562,9 @@ class IntentHandler {
       }
     }
 
-    // -----------------------------------------------------
-    // AUTOMATIC SERVICE + STAFF SELECTION
-    //
-    // This is the important part.
-    //
-    // Example:
-    //
-    // "I want an appointment tomorrow at 18h"
-    //
-    // serviceId = null
-    // staffId   = null
-    //
-    // BookingService searches:
-    //
-    // service 1 → staff 1 ❌
-    // service 1 → staff 2 ❌
-    // service 2 → staff 1 ✅
-    //
-    // -----------------------------------------------------
+    // =====================================================
+    // CHECK EXACT AVAILABILITY
+    // =====================================================
 
     const availability = await this.booking.findBestSalonAvailability(
       user.id,
@@ -587,54 +574,29 @@ class IntentHandler {
       staffId,
     );
 
+    // =====================================================
+    // NOT AVAILABLE
+    // =====================================================
+
     if (!availability.available) {
-      const alternatives = await this.booking.findAlternativeSalonSlots(
-        user.id,
-        bookingDate,
-        bookingTime,
-        serviceId,
-        staffId,
-        5,
+      return await this.handleUnavailableSalonSlot(
+        user,
+        phoneNumber,
+        message,
+        analysis,
+        {
+          bookingDate,
+          bookingTime,
+          serviceId,
+          staffId,
+          requestedService,
+        },
       );
-
-      await this.saveConversationState(user.id, phoneNumber, {
-        ...mergedState,
-        status: 'WAITING_FOR_SLOT',
-        service: requestedService || null,
-        service_id: serviceId,
-        staff_id: staffId,
-        date: bookingDate,
-        time: bookingTime,
-      });
-
-      if (alternatives.length) {
-        return {
-          intent: 'BOOKING',
-          response: `The requested time ${bookingTime} is not available. Please choose another time.`,
-          interactive: {
-            type: 'list',
-            body: `The requested time ${bookingTime} is not available. Please choose another time.`,
-            button: 'Choose a time',
-            items: alternatives.map((slot) => ({
-              id: `slot:${slot.startTime}`,
-              item: slot.startTime,
-              description: slot.endTime
-                ? `Available until ${slot.endTime}`
-                : 'Available',
-            })),
-          },
-        };
-      }
-
-      return {
-        intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          booking_available: false,
-          availability_reason: availability.reason,
-        }),
-      };
     }
+
+    // =====================================================
+    // AVAILABLE
+    // =====================================================
 
     const selectedService = availability.service;
 
@@ -642,26 +604,48 @@ class IntentHandler {
 
     const endTime = availability.endTime;
 
-    if (!customerName) {
-      await this.saveConversationState(user.id, phoneNumber, {
-        ...(await this.getConversationState(user.id, phoneNumber)),
-        status: 'WAITING_FOR_NAME',
-        service: selectedService?.name || requestedService,
-        service_id: selectedService?.id || serviceId,
-        staff_id: selectedStaff?.id || staffId,
-        date: bookingDate,
-        time: bookingTime,
-      });
+    // -----------------------------------------------------
+    // SAVE SERVICE + DATE + TIME
+    // -----------------------------------------------------
 
+    await this.saveConversationState(user.id, phoneNumber, {
+      ...currentState,
+
+      intent: 'BOOKING',
+      status: 'WAITING_FOR_NAME',
+
+      service: selectedService?.name || requestedService,
+
+      service_id: selectedService?.id || serviceId,
+
+      staff: selectedStaff?.name || requestedStaff || null,
+
+      staff_id: selectedStaff?.id || staffId || null,
+
+      date: bookingDate,
+
+      time: bookingTime,
+
+      special_request: specialRequest,
+    });
+
+    // =====================================================
+    // CUSTOMER NAME
+    // =====================================================
+
+    if (!customerName) {
       return {
         intent: 'BOOKING',
-        response: `Your ${selectedService?.name || requestedService} is available at ${bookingTime}. What name should I use for the booking?`,
+
+        response: `Your ${
+          selectedService?.name || requestedService
+        } is available at ${bookingTime}. What name should I use for the booking?`,
       };
     }
 
-    // -----------------------------------------------------
+    // =====================================================
     // CREATE BOOKING
-    // -----------------------------------------------------
+    // =====================================================
 
     const result = await this.booking.createBooking(
       user.id,
@@ -672,8 +656,11 @@ class IntentHandler {
       bookingTime,
       {
         endTime,
-        serviceId: selectedService?.id || null,
-        staffId: selectedStaff?.id || null,
+
+        serviceId: selectedService?.id || serviceId,
+
+        staffId: selectedStaff?.id || staffId || null,
+
         specialRequest,
       },
     );
@@ -686,32 +673,837 @@ class IntentHandler {
     }
 
     // -----------------------------------------------------
+    // CLEAR STATE
+    // -----------------------------------------------------
+
+    await this.clearConversationState(user.id, phoneNumber);
+
+    // -----------------------------------------------------
     // CONFIRMED
+    // -----------------------------------------------------
+
+    return {
+      intent: 'BOOKING',
+
+      response: await this.generateAIResponse(user, phoneNumber, message, {
+        ...analysis,
+
+        booking_available: true,
+
+        booking_confirmed: true,
+
+        booking: {
+          id: result.booking.id,
+
+          date: bookingDate,
+
+          time: bookingTime,
+
+          end_time: endTime,
+
+          service: selectedService?.name || requestedService,
+
+          staff: selectedStaff?.name || null,
+        },
+      }),
+
+      booking: result.booking,
+    };
+  }
+
+  // =========================================================
+  // SHOW AVAILABLE SERVICES
+  // =========================================================
+
+  async showAvailableServices(user, phoneNumber, currentState = {}) {
+    const services = await this.booking.getServices(user.id);
+
+    if (!services.length) {
+      return {
+        intent: 'BOOKING',
+        response: 'Sorry, this business has no services configured yet.',
+      };
+    }
+
+    // -----------------------------------------------------
+    // IMPORTANT
+    //
+    // Preserve date/time/name already collected.
+    // -----------------------------------------------------
+
+    await this.saveConversationState(user.id, phoneNumber, {
+      ...currentState,
+
+      intent: 'BOOKING',
+
+      status: 'WAITING_FOR_SERVICE',
+    });
+
+    const response = this.formatServiceList(
+      services,
+      'Please choose one of our available services:',
+    );
+
+    return {
+      intent: 'BOOKING',
+
+      // This is what the frontend receives.
+      response,
+
+      // This is what WhatsApp receives.
+      interactive: {
+        type: 'list',
+
+        body: 'Please choose one of our available services:',
+
+        button: 'Choose a service',
+
+        items: services.slice(0, 10).map((service) => ({
+          id: `service:${service.id}`,
+
+          item: service.name,
+
+          description: this.formatServiceDescription(service),
+        })),
+      },
+    };
+  }
+
+  // =========================================================
+  // FORMAT SERVICE LIST
+  // =========================================================
+
+  formatServiceList(
+    services,
+    intro = 'Please choose one of our available services:',
+  ) {
+    const lines = services.slice(0, 10).map((service, index) => {
+      const duration = service.duration_minutes
+        ? `${service.duration_minutes} min`
+        : null;
+
+      const price =
+        service.price !== null && service.price !== undefined
+          ? `${service.price}`
+          : null;
+
+      const details = [duration, price].filter(Boolean).join(' — ');
+
+      return `${index + 1}. ${service.name}` + (details ? ` — ${details}` : '');
+    });
+
+    return `${intro}\n\n` + lines.join('\n');
+  }
+
+  // =========================================================
+  // SERVICE DESCRIPTION
+  // =========================================================
+
+  formatServiceDescription(service) {
+    const parts = [];
+
+    if (service.duration_minutes) {
+      parts.push(`${service.duration_minutes} min`);
+    }
+
+    if (service.price !== null && service.price !== undefined) {
+      parts.push(`${service.price}`);
+    }
+
+    return parts.join(' • ');
+  }
+
+  // =========================================================
+  // SERVICE TEXT SELECTION
+  // =========================================================
+
+  async handleServiceTextSelection(user, phoneNumber, message, state) {
+    if (!message) {
+      return null;
+    }
+
+    const text = String(message).trim().toLowerCase();
+
+    // -----------------------------------------------------
+    // Ignore ambiguous messages
+    // -----------------------------------------------------
+
+    if (
+      !text ||
+      text === '?' ||
+      text === '??' ||
+      text === 'which?' ||
+      text === 'which one?' ||
+      text === 'what?' ||
+      text === 'what services?'
+    ) {
+      return await this.showAvailableServices(user, phoneNumber, state);
+    }
+
+    const services = await this.booking.getServices(user.id);
+
+    // -----------------------------------------------------
+    // Exact visible service name
+    // -----------------------------------------------------
+
+    let selected = services.find(
+      (service) => String(service.name).trim().toLowerCase() === text,
+    );
+
+    // -----------------------------------------------------
+    // Number selection
+    // -----------------------------------------------------
+
+    if (!selected) {
+      const number = Number(text);
+
+      if (
+        Number.isInteger(number) &&
+        number >= 1 &&
+        number <= services.length
+      ) {
+        selected = services[number - 1];
+      }
+    }
+
+    // -----------------------------------------------------
+    // Partial match
+    // -----------------------------------------------------
+
+    if (!selected) {
+      selected = services.find((service) => {
+        const name = String(service.name).trim().toLowerCase();
+
+        return name.includes(text) || text.includes(name);
+      });
+    }
+
+    // -----------------------------------------------------
+    // Not a service
+    // -----------------------------------------------------
+
+    if (!selected) {
+      return null;
+    }
+
+    const nextState = {
+      ...state,
+
+      intent: 'BOOKING',
+
+      status: 'SERVICE_SELECTED',
+
+      service: selected.name,
+
+      service_id: selected.id,
+    };
+
+    await this.saveConversationState(user.id, phoneNumber, nextState);
+
+    // -----------------------------------------------------
+    // DATE / TIME NOT YET KNOWN
+    // -----------------------------------------------------
+
+    if (!nextState.date || !nextState.time) {
+      return {
+        intent: 'BOOKING',
+        response: `Great, ${selected.name} selected. What date and time would you prefer?`,
+      };
+    }
+
+    // -----------------------------------------------------
+    // CHECK AVAILABILITY
+    // -----------------------------------------------------
+
+    return await this.processSalonAvailabilityAfterSelection(
+      user,
+      phoneNumber,
+      message,
+      nextState,
+    );
+  }
+
+  // =========================================================
+  // INTERACTIVE SELECTION
+  // =========================================================
+
+  async handleInteractiveSelection(user, phoneNumber, message, payload) {
+    if (!payload) {
+      return null;
+    }
+
+    const state = await this.getConversationState(user.id, phoneNumber);
+
+    // =====================================================
+    // SERVICE
+    // =====================================================
+
+    if (payload.startsWith('service:')) {
+      const serviceId = Number(payload.substring('service:'.length));
+
+      if (!Number.isInteger(serviceId)) {
+        return null;
+      }
+
+      const services = await this.booking.getServices(user.id);
+
+      const service = services.find((item) => Number(item.id) === serviceId);
+
+      // -----------------------------------------------------
+      // NEVER TRUST PAYLOAD ALONE
+      // -----------------------------------------------------
+
+      if (!service) {
+        return {
+          intent: 'BOOKING',
+          response:
+            'That service is no longer available. Please choose another service.',
+          interactive: await this.buildServiceInteractive(user.id),
+        };
+      }
+
+      const nextState = {
+        ...state,
+
+        intent: 'BOOKING',
+
+        status: 'SERVICE_SELECTED',
+
+        service: service.name,
+
+        service_id: service.id,
+      };
+
+      await this.saveConversationState(user.id, phoneNumber, nextState);
+
+      // -----------------------------------------------------
+      // DATE/TIME MISSING
+      // -----------------------------------------------------
+
+      if (!nextState.date || !nextState.time) {
+        return {
+          intent: 'BOOKING',
+          response: `Great, ${service.name} selected. What date and time would you prefer?`,
+        };
+      }
+
+      // -----------------------------------------------------
+      // CHECK AVAILABILITY
+      // -----------------------------------------------------
+
+      return await this.processSalonAvailabilityAfterSelection(
+        user,
+        phoneNumber,
+        message,
+        nextState,
+      );
+    }
+
+    // =====================================================
+    // SLOT
+    // =====================================================
+
+    if (payload.startsWith('slot:')) {
+      const selectedTime = payload.substring('slot:'.length);
+
+      if (!/^\d{2}:\d{2}$/.test(selectedTime)) {
+        return null;
+      }
+
+      const nextState = {
+        ...state,
+
+        intent: 'BOOKING',
+
+        status: 'SLOT_SELECTED',
+
+        time: selectedTime,
+      };
+
+      await this.saveConversationState(user.id, phoneNumber, nextState);
+
+      return await this.processSalonAvailabilityAfterSelection(
+        user,
+        phoneNumber,
+        message,
+        nextState,
+      );
+    }
+
+    return null;
+  }
+
+  // =========================================================
+  // BUILD SERVICE INTERACTIVE
+  // =========================================================
+
+  async buildServiceInteractive(userId) {
+    const services = await this.booking.getServices(userId);
+
+    return {
+      type: 'list',
+
+      body: 'Please choose one of our available services:',
+
+      button: 'Choose a service',
+
+      items: services.slice(0, 10).map((service) => ({
+        id: `service:${service.id}`,
+
+        item: service.name,
+
+        description: this.formatServiceDescription(service),
+      })),
+    };
+  }
+
+  // =========================================================
+  // SLOT TEXT SELECTION
+  // =========================================================
+
+  async handleSlotTextSelection(user, phoneNumber, message, state) {
+    if (!message) {
+      return null;
+    }
+
+    const text = String(message).trim();
+
+    if (!/^\d{1,2}:\d{2}$/.test(text)) {
+      return null;
+    }
+
+    const parts = text.split(':');
+
+    const hour = String(Number(parts[0])).padStart(2, '0');
+
+    const minute = String(Number(parts[1])).padStart(2, '0');
+
+    const selectedTime = `${hour}:${minute}`;
+
+    const nextState = {
+      ...state,
+
+      intent: 'BOOKING',
+
+      status: 'SLOT_SELECTED',
+
+      time: selectedTime,
+    };
+
+    await this.saveConversationState(user.id, phoneNumber, nextState);
+
+    return await this.processSalonAvailabilityAfterSelection(
+      user,
+      phoneNumber,
+      message,
+      nextState,
+    );
+  }
+
+  // =========================================================
+  // SALON AVAILABILITY AFTER SELECTION
+  // =========================================================
+
+  async processSalonAvailabilityAfterSelection(
+    user,
+    phoneNumber,
+    message,
+    state,
+  ) {
+    if (!state.service_id || !state.date || !state.time) {
+      return {
+        intent: 'BOOKING',
+        response: 'Please provide the date and time for the appointment.',
+      };
+    }
+
+    const staffId = state.staff_id || null;
+
+    const availability = await this.booking.findBestSalonAvailability(
+      user.id,
+      state.date,
+      state.time,
+      state.service_id,
+      staffId,
+    );
+
+    // -----------------------------------------------------
+    // NOT AVAILABLE
+    // -----------------------------------------------------
+
+    if (!availability.available) {
+      const alternatives = await this.booking.findAlternativeSalonSlots(
+        user.id,
+        state.date,
+        state.time,
+        state.service_id,
+        staffId,
+        5,
+      );
+
+      await this.saveConversationState(user.id, phoneNumber, {
+        ...state,
+
+        status: 'WAITING_FOR_SLOT',
+      });
+
+      if (!alternatives.length) {
+        return {
+          intent: 'BOOKING',
+          response:
+            'That time is no longer available. Please choose another time.',
+        };
+      }
+
+      return {
+        intent: 'BOOKING',
+
+        response: 'That time is not available. Please choose another time:',
+
+        interactive: {
+          type: 'list',
+
+          body: 'That time is not available. Please choose another time:',
+
+          button: 'Choose a time',
+
+          items: alternatives.map((slot) => ({
+            id: `slot:${slot.startTime}`,
+
+            item: slot.startTime,
+
+            description: slot.endTime
+              ? `Available until ${slot.endTime}`
+              : 'Available',
+          })),
+        },
+      };
+    }
+
+    // =====================================================
+    // AVAILABLE
+    // =====================================================
+
+    const selectedService = availability.service;
+
+    const selectedStaff = availability.staff;
+
+    const endTime = availability.endTime;
+
+    // -----------------------------------------------------
+    // CUSTOMER NAME
+    // -----------------------------------------------------
+
+    const customerName = state.name || null;
+
+    if (!customerName) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        ...state,
+
+        status: 'WAITING_FOR_NAME',
+
+        service: selectedService?.name || state.service,
+
+        service_id: selectedService?.id || state.service_id,
+
+        staff: selectedStaff?.name || state.staff || null,
+
+        staff_id: selectedStaff?.id || state.staff_id || null,
+
+        date: state.date,
+
+        time: state.time,
+      });
+
+      return {
+        intent: 'BOOKING',
+
+        response: `Great. ${selectedService?.name || state.service} is available at ${state.time}. What name should I use for the booking?`,
+      };
+    }
+
+    // =====================================================
+    // CREATE BOOKING
+    // =====================================================
+
+    const result = await this.booking.createBooking(
+      user.id,
+      customerName,
+      phoneNumber,
+      1,
+      state.date,
+      state.time,
+      {
+        endTime,
+
+        serviceId: selectedService?.id || state.service_id,
+
+        staffId: selectedStaff?.id || state.staff_id || null,
+
+        specialRequest: state.special_request || null,
+      },
+    );
+
+    if (!result.success) {
+      return {
+        intent: 'BOOKING',
+
+        response:
+          'Sorry, I could not confirm your appointment. Please choose another time.',
+      };
+    }
+
+    // -----------------------------------------------------
+    // CLEAR STATE
     // -----------------------------------------------------
 
     await this.clearConversationState(user.id, phoneNumber);
 
     return {
       intent: 'BOOKING',
-      response: await this.generateAIResponse(user, phoneNumber, message, {
-        ...analysis,
-        booking_available: true,
-        booking_confirmed: true,
-        booking: {
-          id: result.booking.id,
-          date: bookingDate,
-          time: bookingTime,
-          end_time: endTime,
-          service: selectedService?.name || null,
-          staff: selectedStaff?.name || null,
-        },
-      }),
+
+      response: `Perfect. Your ${selectedService?.name || state.service} appointment is confirmed for ${state.date} at ${state.time}.`,
+
       booking: result.booking,
     };
   }
 
   // =========================================================
-  // GENERIC SERVICE / SLOT
+  // UNAVAILABLE SALON SLOT
+  // =========================================================
+
+  async handleUnavailableSalonSlot(user, phoneNumber, message, analysis, data) {
+    const { bookingDate, bookingTime, serviceId, staffId, requestedService } =
+      data;
+
+    const alternatives = await this.booking.findAlternativeSalonSlots(
+      user.id,
+      bookingDate,
+      bookingTime,
+      serviceId,
+      staffId,
+      5,
+    );
+
+    const state = await this.getConversationState(user.id, phoneNumber);
+
+    await this.saveConversationState(user.id, phoneNumber, {
+      ...state,
+
+      intent: 'BOOKING',
+
+      status: 'WAITING_FOR_SLOT',
+
+      service: requestedService,
+
+      service_id: serviceId,
+
+      staff_id: staffId,
+
+      date: bookingDate,
+
+      time: bookingTime,
+    });
+
+    if (!alternatives.length) {
+      return {
+        intent: 'BOOKING',
+
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+
+          booking_available: false,
+
+          availability_reason: 'NO_ALTERNATIVE_SLOT',
+        }),
+      };
+    }
+
+    return {
+      intent: 'BOOKING',
+
+      response: `The requested time ${bookingTime} is not available. Please choose another time:`,
+
+      interactive: {
+        type: 'list',
+
+        body: `The requested time ${bookingTime} is not available. Please choose another time:`,
+
+        button: 'Choose a time',
+
+        items: alternatives.map((slot) => ({
+          id: `slot:${slot.startTime}`,
+
+          item: slot.startTime,
+
+          description: slot.endTime
+            ? `Available until ${slot.endTime}`
+            : 'Available',
+        })),
+      },
+    };
+  }
+
+  // =========================================================
+  // RESTAURANT BOOKING
+  // =========================================================
+
+  async handleRestaurantBooking(user, phoneNumber, message, analysis, data) {
+    const {
+      customerName,
+      customerPhone,
+      people,
+      bookingDate,
+      bookingTime,
+      specialRequest,
+    } = data;
+
+    // -----------------------------------------------------
+    // NAME
+    // -----------------------------------------------------
+
+    if (!customerName) {
+      const state = await this.getConversationState(user.id, phoneNumber);
+
+      await this.saveConversationState(user.id, phoneNumber, {
+        ...state,
+
+        intent: 'BOOKING',
+
+        status: 'WAITING_FOR_NAME',
+
+        date: bookingDate,
+
+        time: bookingTime,
+
+        people,
+      });
+
+      return {
+        intent: 'BOOKING',
+
+        response: 'What name should I use for the booking?',
+      };
+    }
+
+    // -----------------------------------------------------
+    // PEOPLE
+    // -----------------------------------------------------
+
+    if (!people) {
+      return {
+        intent: 'BOOKING',
+
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+
+          missing_information: ['people'],
+        }),
+      };
+    }
+
+    // -----------------------------------------------------
+    // SETTINGS
+    // -----------------------------------------------------
+
+    const settings = await this.booking.getBusinessSettings(user.id);
+
+    const duration = Number(settings.default_booking_duration_minutes || 90);
+
+    const endTime = this.booking.calculateEndTime(bookingTime, duration);
+
+    // -----------------------------------------------------
+    // ZONE
+    // -----------------------------------------------------
+
+    const requestedZone = this.extractZone(analysis);
+
+    // -----------------------------------------------------
+    // AVAILABILITY
+    // -----------------------------------------------------
+
+    const availability = await this.booking.checkRestaurantAvailability(
+      user.id,
+      bookingDate,
+      bookingTime,
+      endTime,
+      people,
+      requestedZone,
+    );
+
+    if (!availability.available) {
+      return {
+        intent: 'BOOKING',
+
+        response: await this.generateAIResponse(user, phoneNumber, message, {
+          ...analysis,
+
+          booking_available: false,
+
+          availability_reason: availability.reason,
+        }),
+      };
+    }
+
+    // -----------------------------------------------------
+    // CREATE BOOKING
+    // -----------------------------------------------------
+
+    const result = await this.booking.createBooking(
+      user.id,
+      customerName,
+      customerPhone,
+      people,
+      bookingDate,
+      bookingTime,
+      {
+        endTime,
+
+        tableTypeId: availability.tableType?.id || null,
+
+        specialRequest,
+      },
+    );
+
+    if (!result.success) {
+      return {
+        intent: 'BOOKING',
+
+        response: 'Sorry, I could not confirm your booking.',
+      };
+    }
+
+    return {
+      intent: 'BOOKING',
+
+      response: await this.generateAIResponse(user, phoneNumber, message, {
+        ...analysis,
+
+        booking_available: true,
+
+        booking_confirmed: true,
+
+        booking: {
+          id: result.booking.id,
+
+          date: bookingDate,
+
+          time: bookingTime,
+
+          end_time: endTime,
+
+          people,
+
+          table_type: availability.tableType?.name || null,
+        },
+      }),
+
+      booking: result.booking,
+    };
+  }
+
+  // =========================================================
+  // GENERIC BOOKING
   // =========================================================
 
   async handleGenericBooking(user, phoneNumber, message, analysis, data) {
@@ -723,6 +1515,14 @@ class IntentHandler {
       bookingTime,
       specialRequest,
     } = data;
+
+    if (!customerName) {
+      return {
+        intent: 'BOOKING',
+
+        response: 'What name should I use for the booking?',
+      };
+    }
 
     const settings = await this.booking.getBusinessSettings(user.id);
 
@@ -740,9 +1540,12 @@ class IntentHandler {
     if (!availability.available) {
       return {
         intent: 'BOOKING',
+
         response: await this.generateAIResponse(user, phoneNumber, message, {
           ...analysis,
+
           booking_available: false,
+
           availability_reason: 'NO_SLOT_AVAILABLE',
         }),
       };
@@ -764,23 +1567,32 @@ class IntentHandler {
     if (!result.success) {
       return {
         intent: 'BOOKING',
+
         response: 'Sorry, I could not confirm your booking.',
       };
     }
 
     return {
       intent: 'BOOKING',
+
       response: await this.generateAIResponse(user, phoneNumber, message, {
         ...analysis,
+
         booking_available: true,
+
         booking_confirmed: true,
+
         booking: {
           id: result.booking.id,
+
           date: bookingDate,
+
           time: bookingTime,
+
           end_time: endTime,
         },
       }),
+
       booking: result.booking,
     };
   }
@@ -790,32 +1602,58 @@ class IntentHandler {
   // =========================================================
 
   async getConversationState(userId, phoneNumber) {
-    if (!this.db) return {};
+    if (!this.db) {
+      return {};
+    }
 
     try {
       const result = await this.db.query(
-        `SELECT state FROM conversation_states
-         WHERE user_id = $1 AND customer_phone = $2
-         LIMIT 1`,
+        `SELECT state
+           FROM conversation_states
+           WHERE user_id = $1
+           AND customer_phone = $2
+           LIMIT 1`,
         [userId, phoneNumber],
       );
 
       return result.rows[0]?.state || {};
     } catch (err) {
       console.error('Get conversation state error:', err.message);
+
       return {};
     }
   }
 
+  // =========================================================
+  // SAVE STATE
+  // =========================================================
+
   async saveConversationState(userId, phoneNumber, state) {
-    if (!this.db) return;
+    if (!this.db) {
+      return;
+    }
 
     try {
       await this.db.query(
         `INSERT INTO conversation_states
-           (user_id, customer_phone, state, updated_at)
-         VALUES ($1, $2, $3::jsonb, CURRENT_TIMESTAMP)
-         ON CONFLICT (user_id, customer_phone)
+          (
+            user_id,
+            customer_phone,
+            state,
+            updated_at
+          )
+         VALUES
+          (
+            $1,
+            $2,
+            $3::jsonb,
+            CURRENT_TIMESTAMP
+          )
+         ON CONFLICT
+          (
+            user_id,
+            customer_phone
+          )
          DO UPDATE SET
            state = EXCLUDED.state,
            updated_at = CURRENT_TIMESTAMP`,
@@ -826,13 +1664,20 @@ class IntentHandler {
     }
   }
 
+  // =========================================================
+  // CLEAR STATE
+  // =========================================================
+
   async clearConversationState(userId, phoneNumber) {
-    if (!this.db) return;
+    if (!this.db) {
+      return;
+    }
 
     try {
       await this.db.query(
         `DELETE FROM conversation_states
-         WHERE user_id = $1 AND customer_phone = $2`,
+         WHERE user_id = $1
+         AND customer_phone = $2`,
         [userId, phoneNumber],
       );
     } catch (err) {
@@ -840,20 +1685,35 @@ class IntentHandler {
     }
   }
 
+  // =========================================================
+  // MERGE STATE
+  // =========================================================
+
   mergeConversationState(previous, analysis) {
     const entities = analysis?.entities || {};
-    const next = { ...(previous || {}) };
+
+    const next = {
+      ...(previous || {}),
+    };
 
     const values = {
       name: entities.name || entities.customer_name,
+
       people: entities.people || entities.guests || entities.party_size,
+
       service:
         entities.service || entities.service_name || entities.serviceName,
+
       service_id: entities.service_id || entities.serviceId,
+
       staff: entities.staff || entities.staff_name || entities.staffName,
+
       staff_id: entities.staff_id || entities.staffId,
+
       date: entities.date,
-      time: entities.time || entities.time_reference || entities.timeReference,
+
+      time: entities.time,
+
       special_request: entities.special_request || analysis?.special_request,
     };
 
@@ -864,167 +1724,8 @@ class IntentHandler {
     }
 
     next.intent = analysis?.intent || next.intent;
+
     return next;
-  }
-
-  async handleInteractiveSelection(user, phoneNumber, message, payload) {
-    const state = await this.getConversationState(user.id, phoneNumber);
-
-    if (payload.startsWith('service:')) {
-      const serviceId = Number(payload.slice('service:'.length));
-      if (!Number.isInteger(serviceId)) return null;
-
-      const services = await this.booking.getServices(user.id);
-      const service = services.find((item) => Number(item.id) === serviceId);
-      if (!service) return null;
-
-      const bookingDate = state.date || null;
-      const bookingTime = state.time || null;
-
-      const nextState = {
-        ...state,
-        status: 'SERVICE_SELECTED',
-        service: service.name,
-        service_id: service.id,
-      };
-
-      await this.saveConversationState(user.id, phoneNumber, nextState);
-
-      if (!bookingDate || !bookingTime) {
-        return {
-          intent: 'BOOKING',
-          response: `Great, ${service.name} selected. What date and time would you prefer?`,
-        };
-      }
-
-      return await this.processSalonAvailabilityAfterSelection(
-        user,
-        phoneNumber,
-        message,
-        nextState,
-      );
-    }
-
-    if (payload.startsWith('slot:')) {
-      const selectedTime = payload.slice('slot:'.length);
-      if (!/^\d{2}:\d{2}$/.test(selectedTime)) return null;
-
-      const nextState = {
-        ...state,
-        status: 'SLOT_SELECTED',
-        time: selectedTime,
-      };
-
-      await this.saveConversationState(user.id, phoneNumber, nextState);
-
-      return await this.processSalonAvailabilityAfterSelection(
-        user,
-        phoneNumber,
-        message,
-        nextState,
-      );
-    }
-
-    return null;
-  }
-
-  async processSalonAvailabilityAfterSelection(
-    user,
-    phoneNumber,
-    message,
-    state,
-  ) {
-    if (!state.service_id || !state.date || !state.time) {
-      return {
-        intent: 'BOOKING',
-        response: 'Please provide the date and time for the appointment.',
-      };
-    }
-
-    const staffId = state.staff_id || null;
-    const availability = await this.booking.findBestSalonAvailability(
-      user.id,
-      state.date,
-      state.time,
-      state.service_id,
-      staffId,
-    );
-
-    if (!availability.available) {
-      const alternatives = await this.booking.findAlternativeSalonSlots(
-        user.id,
-        state.date,
-        state.time,
-        state.service_id,
-        staffId,
-        5,
-      );
-
-      if (!alternatives.length) {
-        return {
-          intent: 'BOOKING',
-          response:
-            'That time is no longer available. Please choose another time.',
-        };
-      }
-
-      return {
-        intent: 'BOOKING',
-        response:
-          'That time is no longer available. Please choose another time.',
-        interactive: {
-          type: 'list',
-          body: 'That time is no longer available. Please choose another time.',
-          button: 'Choose a time',
-          items: alternatives.map((slot) => ({
-            id: `slot:${slot.startTime}`,
-            item: slot.startTime,
-            description: slot.endTime
-              ? `Available until ${slot.endTime}`
-              : 'Available',
-          })),
-        },
-      };
-    }
-
-    const customerName = state.name || null;
-    if (!customerName) {
-      return {
-        intent: 'BOOKING',
-        response: 'Great. What name should I use for the booking?',
-      };
-    }
-
-    const result = await this.booking.createBooking(
-      user.id,
-      customerName,
-      phoneNumber,
-      1,
-      state.date,
-      state.time,
-      {
-        endTime: availability.endTime,
-        serviceId: availability.service?.id || state.service_id,
-        staffId: availability.staff?.id || staffId,
-        specialRequest: state.special_request || null,
-      },
-    );
-
-    if (!result.success) {
-      return {
-        intent: 'BOOKING',
-        response:
-          'Sorry, I could not confirm your appointment. Please choose another time.',
-      };
-    }
-
-    await this.clearConversationState(user.id, phoneNumber);
-
-    return {
-      intent: 'BOOKING',
-      response: `Perfect. Your ${availability.service?.name || state.service} appointment is confirmed for ${state.date} at ${state.time}.`,
-      booking: result.booking,
-    };
   }
 
   // =========================================================
@@ -1033,19 +1734,18 @@ class IntentHandler {
 
   async findServiceId(userId, serviceName) {
     try {
-      console.log('🔎 Services for user:', userId);
-
-      const services = await this.booking.getServices(userId);
-
-      console.log('📋 Services from DB:', services);
-
       if (!serviceName) {
         return null;
       }
 
+      const services = await this.booking.getServices(userId);
+
       const wanted = String(serviceName).trim().toLowerCase();
 
-      // Exact match first
+      // -----------------------------------------------------
+      // EXACT MATCH
+      // -----------------------------------------------------
+
       const exact = services.find(
         (service) => String(service.name).trim().toLowerCase() === wanted,
       );
@@ -1054,7 +1754,10 @@ class IntentHandler {
         return exact.id;
       }
 
-      // Then substring match
+      // -----------------------------------------------------
+      // PARTIAL MATCH
+      // -----------------------------------------------------
+
       const partial = services.find((service) => {
         const name = String(service.name).trim().toLowerCase();
 
@@ -1075,11 +1778,11 @@ class IntentHandler {
 
   async findStaffId(userId, staffName) {
     try {
-      const staff = await this.booking.getStaff(userId);
-
       if (!staffName) {
         return null;
       }
+
+      const staff = await this.booking.getStaff(userId);
 
       const wanted = String(staffName).trim().toLowerCase();
 
@@ -1122,6 +1825,7 @@ class IntentHandler {
   async handleFAQ(user, phoneNumber, message, analysis) {
     return {
       intent: 'FAQ',
+
       response: await this.generateAIResponse(
         user,
         phoneNumber,
@@ -1138,6 +1842,7 @@ class IntentHandler {
   async handleCancel(user, phoneNumber, message, analysis) {
     return {
       intent: 'CANCEL',
+
       response: await this.generateAIResponse(
         user,
         phoneNumber,
@@ -1154,6 +1859,7 @@ class IntentHandler {
   async handleModify(user, phoneNumber, message, analysis) {
     return {
       intent: 'MODIFY',
+
       response: await this.generateAIResponse(
         user,
         phoneNumber,
@@ -1170,6 +1876,7 @@ class IntentHandler {
   async handleHuman(user, phoneNumber, message, analysis) {
     return {
       intent: 'HUMAN',
+
       response: await this.generateAIResponse(
         user,
         phoneNumber,
@@ -1186,6 +1893,7 @@ class IntentHandler {
   async handleGreeting(user, phoneNumber, message, analysis) {
     return {
       intent: 'GREETING',
+
       response: await this.generateAIResponse(
         user,
         phoneNumber,
@@ -1201,13 +1909,15 @@ class IntentHandler {
 
   async generateAIResponse(user, phoneNumber, message, analysis) {
     try {
-      return await this.ai.generateResponse(message, analysis, {
+      const response = await this.ai.generateResponse(message, analysis, {
         businessName: user.business_name,
 
         businessType: user.business_type,
 
         timezone: user.business_timezone || 'Asia/Dubai',
       });
+
+      return response || 'Sorry, I could not process your request.';
     } catch (err) {
       console.error('Generate AI response error:', err.message);
 
@@ -1216,7 +1926,7 @@ class IntentHandler {
   }
 
   // =========================================================
-  // NUMBER HELPER
+  // NUMBER
   // =========================================================
 
   toNumber(value) {
@@ -1240,10 +1950,6 @@ class IntentHandler {
 
     const ref = String(reference).trim().toLowerCase();
 
-    // -----------------------------------------------------
-    // Current date in business timezone
-    // -----------------------------------------------------
-
     const now = new Date();
 
     const dateFormatter = new Intl.DateTimeFormat('en-CA', {
@@ -1258,39 +1964,51 @@ class IntentHandler {
     const today = new Date(`${todayString}T12:00:00`);
 
     // -----------------------------------------------------
-    // Semantic references normalized by AI
+    // TODAY
     // -----------------------------------------------------
 
     if (ref === 'today' || ref === 'same day') {
       return this.formatDate(today);
     }
 
+    // -----------------------------------------------------
+    // TOMORROW
+    // -----------------------------------------------------
+
     if (ref === 'tomorrow' || ref === 'next day') {
       const date = new Date(today);
+
       date.setDate(date.getDate() + 1);
 
       return this.formatDate(date);
     }
 
+    // -----------------------------------------------------
+    // DAY AFTER TOMORROW
+    // -----------------------------------------------------
+
     if (ref === 'day after tomorrow') {
       const date = new Date(today);
+
       date.setDate(date.getDate() + 2);
 
       return this.formatDate(date);
     }
 
+    // -----------------------------------------------------
+    // YESTERDAY
+    // -----------------------------------------------------
+
     if (ref === 'yesterday') {
       const date = new Date(today);
+
       date.setDate(date.getDate() - 1);
 
       return this.formatDate(date);
     }
 
     // -----------------------------------------------------
-    // "next monday", "next friday", etc.
-    //
-    // AI should normalize Arabic / Darija / French /
-    // Gulf Arabic into this semantic representation.
+    // WEEKDAY
     // -----------------------------------------------------
 
     const weekdays = {
@@ -1326,7 +2044,7 @@ class IntentHandler {
     }
 
     // -----------------------------------------------------
-    // Already normalized YYYY-MM-DD
+    // ALREADY YYYY-MM-DD
     // -----------------------------------------------------
 
     if (/^\d{4}-\d{2}-\d{2}$/.test(ref)) {
