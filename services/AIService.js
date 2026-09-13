@@ -34,25 +34,58 @@ Set booking_follow_up to true only when the message semantically continues an ac
   }
 
   // Claude writes wording only. The handler supplies every business fact.
+  // Only the facts relevant to the actual outcome are sent - a stray
+  // "faq_answer is null" instruction must never be in scope to contradict
+  // a real booking_confirmed:true and tell a customer their booking failed.
   async generateResponse(message, analysis = {}, context = {}) {
     const facts = {
       businessName: context.businessName || null,
       businessType: context.businessType || null,
-      missing_information: analysis.missing_information || [],
-      booking_available: analysis.booking_available,
-      booking_confirmed: analysis.booking_confirmed,
-      availability_reason: analysis.availability_reason || null,
-      booking: analysis.booking || null,
-      faq_answer: analysis.faq_answer || null,
-      staff_not_found: analysis.staff_not_found || null,
     };
+
+    let outcome;
+    if (analysis.booking_confirmed === true) {
+      outcome = 'BOOKING_CONFIRMED';
+      facts.booking = analysis.booking || null;
+    } else if (analysis.staff_not_found) {
+      outcome = 'STAFF_NOT_FOUND';
+      facts.staff_not_found = analysis.staff_not_found;
+    } else if (analysis.missing_information?.length) {
+      outcome = 'MISSING_INFORMATION';
+      facts.missing_information = analysis.missing_information;
+    } else if (analysis.booking_available === false) {
+      outcome = 'BOOKING_UNAVAILABLE';
+      facts.availability_reason = analysis.availability_reason || null;
+    } else {
+      outcome = 'FAQ';
+      facts.faq_answer = analysis.faq_answer ?? null;
+    }
+
     try {
+      // The customer message is given only as a language/tone sample, never
+      // as something to answer directly - the outcome below is already
+      // final. Putting it in the user turn as a live question let the model
+      // ignore FACTS and improvise its own answer to it instead.
       const response = await this.client.messages.create({
         model: this.model,
         max_tokens: 160,
-        temperature: 0.2,
-        system: `Write one short WhatsApp response in the customer's language when possible. Use only FACTS. Never invent services, prices, opening hours, staff, availability, confirmation, or business information. If faq_answer is null, say the information is unavailable and offer human help. FACTS: ${JSON.stringify(facts)}`,
-        messages: [{ role: 'user', content: String(message || '') }],
+        temperature: 0,
+        system: `You write exactly one short WhatsApp reply for a business. The backend has already decided the OUTCOME below - your only job is to phrase it. Do not ask a clarifying question, do not re-interpret the request, do not add or omit any fact, do not invent services, prices, opening hours, staff, availability, confirmation, or business information.
+Rules per OUTCOME value:
+- BOOKING_CONFIRMED: confirm the booking using only the fields in FACTS.booking. Never say it is unavailable, never ask for more information, never suggest contacting the business.
+- STAFF_NOT_FOUND: say that staff member is not available and ask the customer to choose someone else.
+- MISSING_INFORMATION: ask only for the field(s) listed in FACTS.missing_information.
+- BOOKING_UNAVAILABLE: politely say the requested time is not available, mentioning FACTS.availability_reason if present.
+- FAQ: answer using only FACTS.faq_answer if it has data; otherwise say the information is unavailable and offer human help.
+Reply in the same language as the customer sample below. Output only the reply text.
+OUTCOME: ${outcome}
+FACTS: ${JSON.stringify(facts)}`,
+        messages: [
+          {
+            role: 'user',
+            content: `Customer message (for language/tone matching only - already handled, do not answer it): ${JSON.stringify(String(message || ''))}`,
+          },
+        ],
       });
       return this.text(response) || 'Sorry, I could not process that right now. Please try again.';
     } catch (error) {
