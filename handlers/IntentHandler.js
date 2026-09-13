@@ -122,15 +122,26 @@ class IntentHandler {
       const analysis = await this.ai.analyzeMessage(message, context);
 
       // An active slot-selection flow has stronger business meaning than a
-      // generic FAQ label. This decision uses Claude's structured semantic
-      // follow-up flag, never a customer-message keyword or topic string.
+      // generic FAQ label. This decision uses Claude's own structured
+      // semantic output (the follow-up flag, or a concretely extracted date/
+      // date_range), never a customer-message keyword or topic string. The
+      // follow-up flag alone is not reliable turn-to-turn - a customer
+      // supplying the exact date the bot just asked for is booking
+      // follow-up regardless of how that flag came out.
       if (
         conversationState.status === 'WAITING_FOR_SLOT' &&
         (conversationState.date || conversationState.date_range) &&
         analysis.intent === 'FAQ' &&
-        analysis.booking_follow_up === true
+        (analysis.booking_follow_up === true ||
+          analysis.entities?.date ||
+          analysis.entities?.date_range)
       ) {
         analysis.intent = 'BOOKING';
+        // Reclassifying to BOOKING here IS the follow-up determination.
+        // Downstream state merging keys off this flag to decide whether to
+        // keep the in-progress booking context (name, staff, prior date) or
+        // wipe it for a fresh booking - it must not be wiped here.
+        analysis.booking_follow_up = true;
       }
 
       // A short semantic follow-up after an unsuccessful range search has no
