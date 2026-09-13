@@ -49,7 +49,6 @@ class IntentHandler {
       // -----------------------------------------------------
       if (
         conversationState.status === 'WAITING_FOR_SLOT' &&
-        conversationState.service_id &&
         conversationState.date
       ) {
         const alternativeResult = await this.handleAlternativeSlotFollowUp(
@@ -127,7 +126,6 @@ class IntentHandler {
       // follow-up flag, never a customer-message keyword or topic string.
       if (
         conversationState.status === 'WAITING_FOR_SLOT' &&
-        conversationState.service_id &&
         (conversationState.date || conversationState.date_range) &&
         analysis.intent === 'FAQ' &&
         analysis.booking_follow_up === true
@@ -138,18 +136,23 @@ class IntentHandler {
       // A short semantic follow-up after an unsuccessful range search has no
       // new date to search yet. Keep it in booking and ask only for the next
       // booking choice; do not fall through to an unrelated FAQ response.
+      // Staff-only salon MVP bookings have no service_id, so this must not
+      // require one - conversationState.date_range is the validity signal.
       if (
         conversationState.status === 'WAITING_FOR_SLOT' &&
-        conversationState.service_id &&
         conversationState.date_range &&
         analysis.booking_follow_up === true &&
         !analysis.entities?.date &&
         !analysis.entities?.date_range &&
         !analysis.entities?.dateRange
       ) {
+        const serviceLabel = conversationState.service
+          ? `available ${conversationState.service} appointment`
+          : 'available appointment';
+
         return {
           intent: 'BOOKING',
-          response: `I still do not have an available ${conversationState.service} appointment from ${conversationState.date_range.from} to ${conversationState.date_range.to}. Please send another date or period you would prefer.`,
+          response: `I still do not have an ${serviceLabel} from ${conversationState.date_range.from} to ${conversationState.date_range.to}. Please send another date or period you would prefer.`,
         };
       }
 
@@ -230,7 +233,9 @@ class IntentHandler {
     for (const value of directPayloads) {
       if (
         typeof value === 'string' &&
-        (value.startsWith('service:') || value.startsWith('slot:'))
+        (value.startsWith('service:') ||
+          value.startsWith('slot:') ||
+          value.startsWith('rslot:'))
       ) {
         return value;
       }
@@ -263,7 +268,11 @@ class IntentHandler {
     }
 
     if (typeof value === 'string') {
-      if (value.startsWith('service:') || value.startsWith('slot:')) {
+      if (
+        value.startsWith('service:') ||
+        value.startsWith('slot:') ||
+        value.startsWith('rslot:')
+      ) {
         return value;
       }
 
