@@ -26,26 +26,35 @@ class AIService {
         context.currentDate || new Date().toISOString().split('T')[0];
 
       const timezone = context.timezone || 'Asia/Dubai';
-
       const businessName = context.businessName || 'the business';
+      const businessType = context.businessType || 'business';
+
+      const conversationState = context.conversationState || {};
+
+      const availableServices = Array.isArray(context.availableServices)
+        ? context.availableServices
+        : [];
+
+      const availableStaff = Array.isArray(context.availableStaff)
+        ? context.availableStaff
+        : [];
 
       const prompt = `
 You are the multilingual WhatsApp AI assistant for "${businessName}".
 
-Your job is to UNDERSTAND the customer's message, not to guess or invent information.
+BUSINESS TYPE:
+${businessType}
+
+Your job is to UNDERSTAND the customer's message semantically.
 
 IMPORTANT:
 - Customers may speak English, Arabic, Gulf Arabic, UAE Arabic, Moroccan Darija, French, or mixed languages.
 - Understand natural language semantically.
 - Do NOT rely on keyword dictionaries.
-- Understand different ways people express dates, times, quantities and requests.
-- Arabic dialects can be very different. Moroccan Darija and Gulf/UAE Arabic are both valid.
-- If the customer mixes Arabic and English, understand the complete meaning.
-- Never invent a date, time, number of people, name or phone number.
+- Understand natural ways people express services, dates, times, quantities and requests.
+- Never invent information.
+- Never invent a service or staff member that is not provided in the business data.
 - If something is not provided or cannot be understood with confidence, return null.
-- "tomorrow", "next Friday", Arabic date expressions, Gulf expressions, Darija expressions, etc. should be understood naturally by the AI.
-- Return date_reference as a semantic reference when the customer uses a relative date.
-- Return an exact date only when it is explicitly clear from the message and current date.
 
 CURRENT DATE:
 ${currentDate}
@@ -53,8 +62,86 @@ ${currentDate}
 BUSINESS TIMEZONE:
 ${timezone}
 
+AVAILABLE SERVICES:
+${JSON.stringify(availableServices)}
+
+AVAILABLE STAFF:
+${JSON.stringify(availableStaff)}
+
+CURRENT CONVERSATION STATE:
+${JSON.stringify(conversationState)}
+
 CUSTOMER MESSAGE:
 ${message}
+
+VERY IMPORTANT CONVERSATION RULE:
+
+If CURRENT CONVERSATION STATE contains an active booking/reservation,
+the customer is continuing that booking unless they clearly say they want to:
+- cancel it
+- modify an existing confirmed booking
+- speak to a human
+- ask an unrelated FAQ
+
+Short follow-up messages such as:
+- "Monday"
+- "6pm"
+- "4 people"
+- "my name is Ahmed"
+- "I told you Monday"
+- "yes"
+- "first booking"
+- "for me"
+must be interpreted using the existing conversation state.
+
+DO NOT reset or erase information already present in CURRENT CONVERSATION STATE.
+
+Extract only NEW information from the current message.
+
+If the customer provides a missing booking field while a booking is active,
+intent MUST normally remain BOOKING.
+
+DATE RULES:
+
+If the customer clearly refers to a specific calendar date or weekday:
+- Resolve it using CURRENT DATE and BUSINESS TIMEZONE.
+- Return the resolved date as YYYY-MM-DD when possible.
+- Example: if today is Thursday and customer says "Monday", return the next Monday.
+- Example: "tomorrow" should be resolved to the actual YYYY-MM-DD date.
+- Example: "next Friday" should be resolved to the appropriate YYYY-MM-DD date.
+- date_reference may still contain the semantic meaning.
+
+TIME RULES:
+- "7pm" -> "19:00"
+- "8:30 PM" -> "20:30"
+- "around 8" -> time_reference = "around 8", time = null
+- Never invent an exact time.
+
+SERVICE RULE:
+If the customer wants a service, identify the matching service from AVAILABLE SERVICES.
+Return the canonical service name exactly as provided in AVAILABLE SERVICES.
+
+STAFF RULE:
+If the customer explicitly requests a staff member, identify the matching staff member from AVAILABLE STAFF.
+Return the canonical staff name exactly as provided in AVAILABLE STAFF.
+
+BOOKING RULE:
+For a salon:
+- service is normally required
+- date is required
+- time is required
+- customer name is required
+
+For a restaurant:
+- people is normally required
+- date is required
+- time is required
+- customer name is required
+
+PHONE:
+The customer's WhatsApp phone is already known by the backend.
+Do not ask for it.
+Only return phone if the customer explicitly provides another phone number.
 
 Return ONLY valid JSON.
 
@@ -71,37 +158,39 @@ Use exactly this structure:
     "time": null,
     "time_reference": null,
     "name": null,
-    "phone": null
+    "phone": null,
+    "service": null,
+    "staff": null
   },
   "special_request": null,
   "question": null
 }
 
-RULES:
+LANGUAGE:
+- "en" = English
+- "ar" = Arabic, Gulf Arabic, UAE Arabic or Moroccan Darija
+- "fr" = French
+- "mixed" = genuinely mixed languages
+- "other" = otherwise
 
-language:
-- "en" for English
-- "ar" for Arabic, including Gulf Arabic and Moroccan Darija
-- "fr" for French
-- "mixed" when languages are genuinely mixed
-- "other" otherwise
+INTENT:
 
-intent:
 BOOKING:
-Customer wants to make a reservation.
+Customer wants to make a reservation or appointment,
+or is clearly continuing an active booking conversation.
 
 FAQ:
-Customer asks a question about the business, for example:
-opening hours, location, parking, menu, prices, services, availability information, etc.
+Customer asks about the business, services, prices, opening hours,
+location, parking, etc.
 
 CANCEL:
 Customer wants to cancel an existing reservation.
 
 MODIFY:
-Customer wants to change an existing reservation.
+Customer wants to modify an EXISTING CONFIRMED reservation.
 
 HUMAN:
-Customer explicitly wants to talk to a human/person/staff member.
+Customer explicitly wants a human/person/staff member.
 
 GREETING:
 Simple greeting without another request.
@@ -109,71 +198,44 @@ Simple greeting without another request.
 OTHER:
 Anything else.
 
-entities.people:
-Number of people if clearly provided.
-Otherwise null.
+Do not confuse a booking follow-up with MODIFY.
 
-entities.date:
-Use YYYY-MM-DD only when the exact date is clearly known.
+For example:
+Current state:
+{
+  "intent": "BOOKING",
+  "date": null
+}
 
-entities.date_reference:
-Use a short semantic reference when the customer expresses a relative or natural-language date.
+Customer:
+"Monday"
 
-Examples:
-"tomorrow" -> "tomorrow"
-"next Friday" -> "next Friday"
+Correct:
+{
+  "intent": "BOOKING",
+  "entities": {
+    "date": "2026-09-14"
+  }
+}
 
-For Arabic/Darija/Gulf Arabic, translate the semantic meaning into English rather than returning the original phrase.
+NOT MODIFY.
 
-If there is no date -> null.
+Another example:
 
-entities.time:
-Return HH:MM when the exact time is clear.
+Current state:
+{
+  "intent": "BOOKING",
+  "service": "Manicure",
+  "date": null
+}
 
-Examples:
-"7pm" -> "19:00"
-"8:30 PM" -> "20:30"
+Customer:
+"6pm"
 
-If only a vague period is given, keep time null and use time_reference.
+Correct:
+BOOKING with time = "18:00".
 
-entities.time_reference:
-Examples:
-"morning"
-"afternoon"
-"evening"
-"night"
-"around 8"
-Use null if unnecessary.
-
-entities.name:
-Customer name only if clearly provided.
-Otherwise null.
-
-entities.phone:
-Phone number only if clearly provided.
-Otherwise null.
-
-special_request:
-Anything additional requested by the customer.
-
-Examples:
-"table near the window"
-"outdoor table"
-"quiet table"
-"high chair for baby"
-
-question:
-For FAQ messages, describe what the customer is asking in a short semantic form.
-
-Examples:
-"opening_hours"
-"location"
-"parking"
-"menu"
-"price"
-"services"
-
-Do not invent values.
+NOT MODIFY.
 `;
 
       const response = await this.client.messages.create({
@@ -198,7 +260,6 @@ Do not invent values.
         throw new Error('Empty AI response');
       }
 
-      // Remove possible markdown fences
       const cleaned = text
         .replace(/^```json\s*/i, '')
         .replace(/^```\s*/i, '')
@@ -223,6 +284,8 @@ Do not invent values.
           time_reference: null,
           name: null,
           phone: null,
+          service: null,
+          staff: null,
         },
         special_request: null,
         question: null,
@@ -295,6 +358,16 @@ Do not invent values.
         phone:
           typeof entities.phone === 'string' && entities.phone.length > 0
             ? entities.phone
+            : null,
+
+        service:
+          typeof entities.service === 'string' && entities.service.length > 0
+            ? entities.service
+            : null,
+
+        staff:
+          typeof entities.staff === 'string' && entities.staff.length > 0
+            ? entities.staff
             : null,
       },
 

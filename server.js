@@ -112,6 +112,7 @@ const intentHandler = new IntentHandler({
   ai: aiService,
   whatsapp: whatsappService,
   booking: bookingService,
+  db: pool,
 });
 
 console.log('✅ Services: Initialized');
@@ -408,6 +409,21 @@ const initDb = async () => {
   ADD COLUMN IF NOT EXISTS max_bookings_per_slot INTEGER DEFAULT 1;
 `);
 
+    await pool.query(`
+  CREATE TABLE IF NOT EXISTS conversation_states (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    customer_phone VARCHAR(50) NOT NULL,
+    state JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT conversation_states_unique
+      UNIQUE (user_id, customer_phone)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_conversation_states_lookup
+    ON conversation_states(user_id, customer_phone);
+`);
     // ==========================================
     // MESSAGES
     // ==========================================

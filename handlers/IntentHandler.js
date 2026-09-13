@@ -1,801 +1,688 @@
-const AIService = require('../services/AIService');
+// ============================================
+// MESSAGEFLOW - INTENT HANDLER
+// Conversation state + AI + Booking
+// ============================================
 
 class IntentHandler {
   constructor(services) {
     this.ai = services.ai;
+    this.whatsapp = services.whatsapp;
     this.booking = services.booking;
+    this.db = services.db;
   }
 
-  // =========================================================
-  // MAIN MESSAGE HANDLER
-  // =========================================================
+  // ==========================================
+  // CONVERSATION STATE
+  // ==========================================
+
+  async getConversationState(userId, phoneNumber) {
+    try {
+      const result = await this.db.query(
+        `
+        SELECT state
+        FROM conversation_states
+        WHERE user_id = $1
+          AND customer_phone = $2
+        LIMIT 1
+        `,
+        [userId, phoneNumber],
+      );
+
+      return result.rows[0]?.state || null;
+    } catch (err) {
+      console.error('Get conversation state error:', err.message);
+
+      return null;
+    }
+  }
+
+  async saveConversationState(userId, phoneNumber, state) {
+    try {
+      await this.db.query(
+        `
+        INSERT INTO conversation_states (
+          user_id,
+          customer_phone,
+          state,
+          updated_at
+        )
+        VALUES ($1, $2, $3::jsonb, CURRENT_TIMESTAMP)
+
+        ON CONFLICT (user_id, customer_phone)
+        DO UPDATE SET
+          state = EXCLUDED.state,
+          updated_at = CURRENT_TIMESTAMP
+        `,
+        [userId, phoneNumber, JSON.stringify(state)],
+      );
+
+      console.log('💾 Conversation state saved');
+    } catch (err) {
+      console.error('Save conversation state error:', err.message);
+    }
+  }
+
+  async clearConversationState(userId, phoneNumber) {
+    try {
+      await this.db.query(
+        `
+        DELETE FROM conversation_states
+        WHERE user_id = $1
+          AND customer_phone = $2
+        `,
+        [userId, phoneNumber],
+      );
+
+      console.log('🧹 Conversation state cleared');
+    } catch (err) {
+      console.error('Clear conversation state error:', err.message);
+    }
+  }
+
+  // ==========================================
+  // MAIN HANDLER
+  // ==========================================
 
   async handleMessage(user, phoneNumber, message) {
     try {
-      console.log('\n🧠 Analyzing message...');
-      console.log(`📩 ${message}`);
+      console.log('🧠 Analyzing message...');
 
+      // 1. Load previous conversation state
+      const conversationState = await this.getConversationState(
+        user.id,
+        phoneNumber,
+      );
+
+      console.log(
+        '🗂️ Previous state:',
+        JSON.stringify(conversationState, null, 2),
+      );
+
+      // 2. AI context
       const context = {
         businessName: user.business_name,
         businessType: user.business_type,
         timezone: user.business_timezone || 'Asia/Dubai',
+
+        conversationState: conversationState || {},
       };
 
-      // -----------------------------------------------------
-      // ONE AI CALL
-      // -----------------------------------------------------
-
+      // 3. ONE AI analysis
       const analysis = await this.ai.analyzeMessage(message, context);
 
       console.log('🧠 AI analysis:', JSON.stringify(analysis, null, 2));
 
-      const intent = analysis.intent;
-
-      // -----------------------------------------------------
-      // ROUTE INTENT
-      // -----------------------------------------------------
-
-      switch (intent) {
+      // 4. Route intent
+      switch (analysis.intent) {
         case 'BOOKING':
-          return await this.handleBooking(user, phoneNumber, message, analysis);
+          return await this.handleBooking(
+            user,
+            phoneNumber,
+            message,
+            analysis,
+            conversationState,
+          );
+
+        case 'CANCEL':
+          return await this.handleCancel(user, phoneNumber, analysis);
+
+        case 'MODIFY':
+          return await this.handleModify(user, phoneNumber, analysis);
 
         case 'FAQ':
           return await this.handleFAQ(user, phoneNumber, message, analysis);
 
-        case 'CANCEL':
-          return await this.handleCancel(user, phoneNumber, message, analysis);
-
-        case 'MODIFY':
-          return await this.handleModify(user, phoneNumber, message, analysis);
-
         case 'HUMAN':
-          return await this.handleHuman(user, phoneNumber, message, analysis);
+          return {
+            intent: 'HUMAN',
+            response:
+              'Of course. I will connect you with someone from our team.',
+          };
 
         case 'GREETING':
-          return await this.handleGreeting(
-            user,
-            phoneNumber,
-            message,
-            analysis,
-          );
+          return {
+            intent: 'GREETING',
+            response: `Welcome to ${user.business_name || 'our business'}! How can I help you today?`,
+          };
 
         default:
-          return await this.generateAIResponse(
-            user,
-            phoneNumber,
-            message,
-            analysis,
-          );
+          return {
+            intent: 'OTHER',
+            response: await this.ai.generateResponse(message, analysis, {
+              businessName: user.business_name,
+              businessType: user.business_type,
+            }),
+          };
       }
     } catch (err) {
       console.error('IntentHandler error:', err.message);
 
       return {
         intent: 'OTHER',
-        response: 'Sorry, something went wrong. Please try again.',
+        response: 'Sorry, I was unable to process your request right now.',
       };
     }
   }
 
-  // =========================================================
+  // ==========================================
   // BOOKING
-  // =========================================================
+  // ==========================================
 
-  async handleBooking(user, phoneNumber, message, analysis) {
-    try {
-      const entities = analysis.entities || {};
+  async handleBooking(user, phoneNumber, message, analysis, previousState) {
+    const entities = analysis.entities || {};
 
-      // -----------------------------------------------------
-      // BASIC DATA
-      // -----------------------------------------------------
+    const previousBooking = previousState?.booking || {};
 
-      const businessType = String(user.business_type || '').toLowerCase();
+    // ------------------------------------------
+    // MERGE OLD + NEW INFORMATION
+    // ------------------------------------------
 
-      const customerName = entities.name || entities.customer_name || null;
+    const customerName =
+      entities.name ||
+      entities.customer_name ||
+      previousBooking.customerName ||
+      null;
 
-      // IMPORTANT:
-      // Phone ALWAYS comes from WhatsApp.
-      const customerPhone = phoneNumber;
-
-      const people = this.toNumber(
+    const people =
+      this.toNumber(
         entities.people || entities.guests || entities.party_size,
-      );
+      ) ||
+      previousBooking.people ||
+      null;
 
-      let bookingDate = entities.date || null;
+    let bookingDate = entities.date || previousBooking.date || null;
 
+    let bookingTime =
+      entities.time || entities.time_reference || previousBooking.time || null;
+
+    const service =
+      entities.service ||
+      entities.service_name ||
+      entities.serviceName ||
+      previousBooking.service ||
+      null;
+
+    const staff =
+      entities.staff ||
+      entities.staff_name ||
+      entities.staffName ||
+      previousBooking.staff ||
+      null;
+
+    const specialRequest =
+      analysis.special_request ||
+      entities.special_request ||
+      previousBooking.specialRequest ||
+      null;
+
+    // ------------------------------------------
+    // DATE RESOLUTION
+    // ------------------------------------------
+
+    if (!bookingDate) {
       const dateReference =
         entities.date_reference || entities.dateReference || null;
 
-      const bookingTime =
-        entities.time ||
-        entities.time_reference ||
-        entities.timeReference ||
-        null;
-
-      const specialRequest =
-        entities.special_request || analysis.special_request || null;
-
-      // -----------------------------------------------------
-      // RESOLVE DATE
-      // -----------------------------------------------------
-
-      if (!bookingDate && dateReference) {
+      if (dateReference) {
         bookingDate = this.resolveDateReference(
           dateReference,
           user.business_timezone || 'Asia/Dubai',
         );
       }
+    }
 
-      // -----------------------------------------------------
-      // REQUIRED: DATE
-      // -----------------------------------------------------
+    // ------------------------------------------
+    // CURRENT STATE
+    // ------------------------------------------
 
-      if (!bookingDate) {
-        return {
-          intent: 'BOOKING',
-          response: await this.generateAIResponse(user, phoneNumber, message, {
-            ...analysis,
-            missing_information: ['date'],
-          }),
-        };
-      }
+    const currentBooking = {
+      customerName,
+      people,
+      date: bookingDate,
+      time: bookingTime,
+      service,
+      staff,
+      specialRequest,
+    };
 
-      // -----------------------------------------------------
-      // REQUIRED: TIME
-      // -----------------------------------------------------
+    console.log(
+      '📋 Current booking state:',
+      JSON.stringify(currentBooking, null, 2),
+    );
 
-      if (!bookingTime) {
-        return {
-          intent: 'BOOKING',
-          response: await this.generateAIResponse(user, phoneNumber, message, {
-            ...analysis,
-            missing_information: ['time'],
-          }),
-        };
-      }
+    // ------------------------------------------
+    // SALON
+    // ------------------------------------------
 
-      // -----------------------------------------------------
-      // CUSTOMER NAME
-      // -----------------------------------------------------
-
-      if (!customerName) {
-        return {
-          intent: 'BOOKING',
-          response: await this.generateAIResponse(user, phoneNumber, message, {
-            ...analysis,
-            missing_information: ['name'],
-          }),
-        };
-      }
-
-      // =====================================================
-      // RESTAURANT
-      // =====================================================
-
-      if (
-        businessType.includes('restaurant') ||
-        businessType.includes('resto')
-      ) {
-        return await this.handleRestaurantBooking(
-          user,
-          phoneNumber,
-          message,
-          analysis,
-          {
-            customerName,
-            customerPhone,
-            people,
-            bookingDate,
-            bookingTime,
-            specialRequest,
-          },
-        );
-      }
-
-      // =====================================================
-      // SALON
-      // =====================================================
-
-      if (
-        businessType.includes('salon') ||
-        businessType.includes('hair') ||
-        businessType.includes('beauty') ||
-        businessType.includes('barber')
-      ) {
-        return await this.handleSalonBooking(
-          user,
-          phoneNumber,
-          message,
-          analysis,
-          {
-            customerName,
-            customerPhone,
-            bookingDate,
-            bookingTime,
-            specialRequest,
-          },
-        );
-      }
-
-      // =====================================================
-      // GENERIC SERVICE / SLOT
-      // =====================================================
-
-      return await this.handleGenericBooking(
+    if (String(user.business_type || '').toLowerCase() === 'salon') {
+      return await this.handleSalonBooking(
         user,
         phoneNumber,
-        message,
         analysis,
-        {
-          customerName,
-          customerPhone,
-          people,
-          bookingDate,
-          bookingTime,
-          specialRequest,
-        },
+        currentBooking,
       );
-    } catch (err) {
-      console.error('Handle booking error:', err.message);
-
-      return {
-        intent: 'BOOKING',
-        response: 'Sorry, I could not process your booking right now.',
-      };
     }
+
+    // ------------------------------------------
+    // RESTAURANT
+    // ------------------------------------------
+
+    if (String(user.business_type || '').toLowerCase() === 'restaurant') {
+      return await this.handleRestaurantBooking(
+        user,
+        phoneNumber,
+        analysis,
+        currentBooking,
+      );
+    }
+
+    // ------------------------------------------
+    // GENERIC
+    // ------------------------------------------
+
+    return await this.handleGenericBooking(
+      user,
+      phoneNumber,
+      analysis,
+      currentBooking,
+    );
   }
 
-  // =========================================================
-  // RESTAURANT BOOKING
-  // =========================================================
-
-  async handleRestaurantBooking(user, phoneNumber, message, analysis, data) {
-    const {
-      customerName,
-      customerPhone,
-      people,
-      bookingDate,
-      bookingTime,
-      specialRequest,
-    } = data;
-
-    // -----------------------------------------------------
-    // RESTAURANT REQUIRES NUMBER OF PEOPLE
-    // -----------------------------------------------------
-
-    if (!people) {
-      return {
-        intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          missing_information: ['people'],
-        }),
-      };
-    }
-
-    // -----------------------------------------------------
-    // GET BUSINESS SETTINGS
-    // -----------------------------------------------------
-
-    const settings = await this.booking.getBusinessSettings(user.id);
-
-    const duration = Number(settings.default_booking_duration_minutes || 90);
-
-    const endTime = this.booking.calculateEndTime(bookingTime, duration);
-
-    // -----------------------------------------------------
-    // OPTIONAL ZONE
-    // -----------------------------------------------------
-
-    const requestedZone = this.extractZone(analysis);
-
-    // -----------------------------------------------------
-    // CHECK TABLE
-    // -----------------------------------------------------
-
-    const availability = await this.booking.checkRestaurantAvailability(
-      user.id,
-      bookingDate,
-      bookingTime,
-      endTime,
-      people,
-      requestedZone,
-    );
-
-    if (!availability.available) {
-      return {
-        intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          booking_available: false,
-          availability_reason: availability.reason,
-        }),
-      };
-    }
-
-    // -----------------------------------------------------
-    // CREATE BOOKING
-    // -----------------------------------------------------
-
-    const result = await this.booking.createBooking(
-      user.id,
-      customerName,
-      customerPhone,
-      people,
-      bookingDate,
-      bookingTime,
-      {
-        endTime,
-        tableTypeId: availability.tableType?.id || null,
-        specialRequest,
-      },
-    );
-
-    if (!result.success) {
-      return {
-        intent: 'BOOKING',
-        response: 'Sorry, I could not confirm your booking.',
-      };
-    }
-
-    // -----------------------------------------------------
-    // CONFIRMED
-    // -----------------------------------------------------
-
-    return {
-      intent: 'BOOKING',
-      response: await this.generateAIResponse(user, phoneNumber, message, {
-        ...analysis,
-        booking_available: true,
-        booking_confirmed: true,
-        booking: {
-          id: result.booking.id,
-          date: bookingDate,
-          time: bookingTime,
-          end_time: endTime,
-          people,
-          table_type: availability.tableType?.name || null,
-        },
-      }),
-      booking: result.booking,
-    };
-  }
-
-  // =========================================================
+  // ==========================================
   // SALON BOOKING
-  // =========================================================
+  // ==========================================
 
-  async handleSalonBooking(user, phoneNumber, message, analysis, data) {
-    const {
-      customerName,
-      customerPhone,
-      bookingDate,
-      bookingTime,
-      specialRequest,
-    } = data;
+  async handleSalonBooking(user, phoneNumber, analysis, booking) {
+    // Save incomplete state first
+    if (!booking.customerName) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
 
-    const entities = analysis.entities || {};
-
-    // -----------------------------------------------------
-    // SERVICE
-    // -----------------------------------------------------
-
-    const requestedService =
-      entities.service || entities.service_name || entities.serviceName || null;
-
-    // -----------------------------------------------------
-    // STAFF
-    // -----------------------------------------------------
-
-    const requestedStaff =
-      entities.staff || entities.staff_name || entities.staffName || null;
-
-    // -----------------------------------------------------
-    // RESOLVE SERVICE ID
-    //
-    // If AI understood the requested service,
-    // find the actual DB service.
-    //
-    // If no service was mentioned:
-    // serviceId remains null.
-    // findBestSalonAvailability() will try
-    // configured services automatically.
-    // -----------------------------------------------------
-
-    let serviceId = null;
-
-    if (requestedService) {
-      serviceId = await this.findServiceId(user.id, requestedService);
-
-      // AI mentioned a service but DB doesn't contain it.
-      if (!serviceId) {
-        return {
-          intent: 'BOOKING',
-          response: await this.generateAIResponse(user, phoneNumber, message, {
-            ...analysis,
-            missing_information: ['service'],
-            service_not_found: requestedService,
-          }),
-        };
-      }
+      return {
+        intent: 'BOOKING',
+        response: 'Sure! May I have your name?',
+      };
     }
 
-    // -----------------------------------------------------
-    // RESOLVE STAFF ID
-    // -----------------------------------------------------
+    if (!booking.date) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
 
-    let staffId = null;
-
-    if (requestedStaff) {
-      staffId = await this.findStaffId(user.id, requestedStaff);
-
-      if (!staffId) {
-        return {
-          intent: 'BOOKING',
-          response: await this.generateAIResponse(user, phoneNumber, message, {
-            ...analysis,
-            staff_not_found: requestedStaff,
-          }),
-        };
-      }
+      return {
+        intent: 'BOOKING',
+        response: 'What day would you like your appointment?',
+      };
     }
 
-    // -----------------------------------------------------
-    // AUTOMATIC SERVICE + STAFF SELECTION
-    //
-    // This is the important part.
-    //
-    // Example:
-    //
-    // "I want an appointment tomorrow at 18h"
-    //
-    // serviceId = null
-    // staffId   = null
-    //
-    // BookingService searches:
-    //
-    // service 1 → staff 1 ❌
-    // service 1 → staff 2 ❌
-    // service 2 → staff 1 ✅
-    //
-    // -----------------------------------------------------
+    if (!booking.time) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'What time would you prefer?',
+      };
+    }
+
+    // ------------------------------------------
+    // FIND SERVICE + STAFF AVAILABILITY
+    // ------------------------------------------
+
+    const serviceId = await this.findServiceId(user.id, booking.service);
+
+    const staffId = await this.findStaffId(user.id, booking.staff);
 
     const availability = await this.booking.findBestSalonAvailability(
       user.id,
-      bookingDate,
-      bookingTime,
+      booking.date,
+      booking.time,
       serviceId,
       staffId,
     );
 
-    if (!availability.available) {
+    if (!availability?.available) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
       return {
         intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          booking_available: false,
-          availability_reason: availability.reason,
-        }),
+        response:
+          'I’m sorry, but I don’t have availability at that time. Would you like another time?',
       };
     }
 
-    const selectedService = availability.service;
-
-    const selectedStaff = availability.staff;
-
-    const endTime = availability.endTime;
-
-    // -----------------------------------------------------
+    // ------------------------------------------
     // CREATE BOOKING
-    // -----------------------------------------------------
+    // ------------------------------------------
 
     const result = await this.booking.createBooking(
       user.id,
-      customerName,
-      customerPhone,
-      1,
-      bookingDate,
-      bookingTime,
+      booking.customerName,
+      phoneNumber,
+      null,
+      booking.date,
+      booking.time,
       {
-        endTime,
-        serviceId: selectedService?.id || null,
-        staffId: selectedStaff?.id || null,
-        specialRequest,
+        serviceId: availability.serviceId || serviceId || null,
+
+        staffId: availability.staffId || staffId || null,
+
+        specialRequest: booking.specialRequest || null,
+
+        endTime: availability.endTime || null,
       },
     );
 
-    if (!result.success) {
+    if (!result?.success) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
       return {
         intent: 'BOOKING',
-        response: 'Sorry, I could not confirm your appointment.',
+        response:
+          'Sorry, I couldn’t complete the booking. Would you like to try another time?',
       };
     }
 
-    // -----------------------------------------------------
-    // CONFIRMED
-    // -----------------------------------------------------
+    // ------------------------------------------
+    // SUCCESS
+    // ------------------------------------------
+
+    await this.clearConversationState(user.id, phoneNumber);
 
     return {
       intent: 'BOOKING',
-      response: await this.generateAIResponse(user, phoneNumber, message, {
-        ...analysis,
-        booking_available: true,
-        booking_confirmed: true,
-        booking: {
-          id: result.booking.id,
-          date: bookingDate,
-          time: bookingTime,
-          end_time: endTime,
-          service: selectedService?.name || null,
-          staff: selectedStaff?.name || null,
-        },
-      }),
-      booking: result.booking,
+      response: `✅ Your appointment is confirmed for ${booking.date} at ${booking.time}. We look forward to seeing you!`,
+      booking: result,
     };
   }
 
-  // =========================================================
-  // GENERIC SERVICE / SLOT
-  // =========================================================
+  // ==========================================
+  // RESTAURANT BOOKING
+  // ==========================================
 
-  async handleGenericBooking(user, phoneNumber, message, analysis, data) {
-    const {
-      customerName,
-      customerPhone,
-      people,
-      bookingDate,
-      bookingTime,
-      specialRequest,
-    } = data;
+  async handleRestaurantBooking(user, phoneNumber, analysis, booking) {
+    if (!booking.customerName) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
 
-    const settings = await this.booking.getBusinessSettings(user.id);
-
-    const duration = Number(settings.default_booking_duration_minutes || 60);
-
-    const endTime = this.booking.calculateEndTime(bookingTime, duration);
-
-    const availability = await this.booking.checkSlotAvailability(
-      user.id,
-      bookingDate,
-      bookingTime,
-      endTime,
-    );
-
-    if (!availability.available) {
       return {
         intent: 'BOOKING',
-        response: await this.generateAIResponse(user, phoneNumber, message, {
-          ...analysis,
-          booking_available: false,
-          availability_reason: 'NO_SLOT_AVAILABLE',
-        }),
+        response: 'Sure! May I have your name?',
+      };
+    }
+
+    if (!booking.people) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'How many people will the reservation be for?',
+      };
+    }
+
+    if (!booking.date) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'What day would you like to book?',
+      };
+    }
+
+    if (!booking.time) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'What time would you prefer?',
+      };
+    }
+
+    const availability = await this.booking.checkRestaurantAvailability(
+      user.id,
+      booking.date,
+      booking.time,
+      booking.people,
+    );
+
+    if (!availability?.available) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response:
+          'Sorry, we don’t have a table available at that time. Would you like another time?',
       };
     }
 
     const result = await this.booking.createBooking(
       user.id,
-      customerName,
-      customerPhone,
-      people || 1,
-      bookingDate,
-      bookingTime,
+      booking.customerName,
+      phoneNumber,
+      booking.people,
+      booking.date,
+      booking.time,
       {
-        endTime,
-        specialRequest,
+        tableTypeId: availability.tableTypeId || null,
+
+        specialRequest: booking.specialRequest || null,
+
+        endTime: availability.endTime || null,
       },
     );
 
-    if (!result.success) {
+    if (!result?.success) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
       return {
         intent: 'BOOKING',
-        response: 'Sorry, I could not confirm your booking.',
+        response:
+          'Sorry, I couldn’t complete the reservation. Would you like another time?',
       };
     }
 
+    await this.clearConversationState(user.id, phoneNumber);
+
     return {
       intent: 'BOOKING',
-      response: await this.generateAIResponse(user, phoneNumber, message, {
-        ...analysis,
-        booking_available: true,
-        booking_confirmed: true,
-        booking: {
-          id: result.booking.id,
-          date: bookingDate,
-          time: bookingTime,
-          end_time: endTime,
-        },
-      }),
-      booking: result.booking,
+      response: `✅ Your table is confirmed for ${booking.date} at ${booking.time} for ${booking.people} people. See you soon!`,
+      booking: result,
     };
   }
 
-  // =========================================================
-  // FIND SERVICE
-  // =========================================================
+  // ==========================================
+  // GENERIC BOOKING
+  // ==========================================
+
+  async handleGenericBooking(user, phoneNumber, analysis, booking) {
+    if (!booking.customerName) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'May I have your name?',
+      };
+    }
+
+    if (!booking.date) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'What day would you like to book?',
+      };
+    }
+
+    if (!booking.time) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        status: 'collecting',
+        booking,
+      });
+
+      return {
+        intent: 'BOOKING',
+        response: 'What time would you prefer?',
+      };
+    }
+
+    const result = await this.booking.createBooking(
+      user.id,
+      booking.customerName,
+      phoneNumber,
+      null,
+      booking.date,
+      booking.time,
+      {
+        specialRequest: booking.specialRequest || null,
+      },
+    );
+
+    if (!result?.success) {
+      return {
+        intent: 'BOOKING',
+        response: 'Sorry, I couldn’t complete the booking.',
+      };
+    }
+
+    await this.clearConversationState(user.id, phoneNumber);
+
+    return {
+      intent: 'BOOKING',
+      response: `✅ Your appointment is confirmed for ${booking.date} at ${booking.time}.`,
+      booking: result,
+    };
+  }
+
+  // ==========================================
+  // SERVICE LOOKUP
+  // ==========================================
 
   async findServiceId(userId, serviceName) {
-    try {
-      const services = await this.booking.getServices(userId);
+    if (!serviceName) return null;
 
-      if (!serviceName) {
-        return null;
-      }
+    const services = await this.booking.getServices(userId);
 
-      const wanted = String(serviceName).trim().toLowerCase();
+    const normalized = String(serviceName).trim().toLowerCase();
 
-      // Exact match first
-      const exact = services.find(
-        (service) => String(service.name).trim().toLowerCase() === wanted,
+    const match =
+      services.find(
+        (service) => String(service.name).trim().toLowerCase() === normalized,
+      ) ||
+      services.find(
+        (service) =>
+          String(service.name).toLowerCase().includes(normalized) ||
+          normalized.includes(String(service.name).toLowerCase()),
       );
 
-      if (exact) {
-        return exact.id;
-      }
-
-      // Then substring match
-      const partial = services.find((service) => {
-        const name = String(service.name).trim().toLowerCase();
-
-        return name.includes(wanted) || wanted.includes(name);
-      });
-
-      return partial?.id || null;
-    } catch (err) {
-      console.error('Find service error:', err.message);
-
-      return null;
-    }
+    return match?.id || null;
   }
 
-  // =========================================================
-  // FIND STAFF
-  // =========================================================
+  // ==========================================
+  // STAFF LOOKUP
+  // ==========================================
 
   async findStaffId(userId, staffName) {
-    try {
-      const staff = await this.booking.getStaff(userId);
+    if (!staffName) return null;
 
-      if (!staffName) {
-        return null;
-      }
+    const staff = await this.booking.getStaff(userId);
 
-      const wanted = String(staffName).trim().toLowerCase();
+    const normalized = String(staffName).trim().toLowerCase();
 
-      const exact = staff.find(
-        (employee) => String(employee.name).trim().toLowerCase() === wanted,
+    const match =
+      staff.find(
+        (person) => String(person.name).trim().toLowerCase() === normalized,
+      ) ||
+      staff.find(
+        (person) =>
+          String(person.name).toLowerCase().includes(normalized) ||
+          normalized.includes(String(person.name).toLowerCase()),
       );
 
-      if (exact) {
-        return exact.id;
-      }
+    return match?.id || null;
+  }
 
-      const partial = staff.find((employee) => {
-        const name = String(employee.name).trim().toLowerCase();
+  // ==========================================
+  // DATE RESOLVER
+  // ==========================================
 
-        return name.includes(wanted) || wanted.includes(name);
-      });
+  resolveDateReference(reference, timezone = 'Asia/Dubai') {
+    if (!reference) return null;
 
-      return partial?.id || null;
-    } catch (err) {
-      console.error('Find staff error:', err.message);
+    const now = new Date();
 
-      return null;
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    const today = formatter.format(now);
+
+    const base = new Date(`${today}T12:00:00`);
+
+    const normalized = String(reference).trim().toLowerCase();
+
+    if (normalized === 'today') {
+      return today;
     }
-  }
 
-  // =========================================================
-  // ZONE
-  // =========================================================
+    if (normalized === 'tomorrow') {
+      base.setDate(base.getDate() + 1);
 
-  extractZone(analysis) {
-    const entities = analysis.entities || {};
-
-    return entities.zone || entities.requested_zone || entities.area || null;
-  }
-
-  // =========================================================
-  // FAQ
-  // =========================================================
-
-  async handleFAQ(user, phoneNumber, message, analysis) {
-    return {
-      intent: 'FAQ',
-      response: await this.generateAIResponse(
-        user,
-        phoneNumber,
-        message,
-        analysis,
-      ),
-    };
-  }
-
-  // =========================================================
-  // CANCEL
-  // =========================================================
-
-  async handleCancel(user, phoneNumber, message, analysis) {
-    return {
-      intent: 'CANCEL',
-      response: await this.generateAIResponse(
-        user,
-        phoneNumber,
-        message,
-        analysis,
-      ),
-    };
-  }
-
-  // =========================================================
-  // MODIFY
-  // =========================================================
-
-  async handleModify(user, phoneNumber, message, analysis) {
-    return {
-      intent: 'MODIFY',
-      response: await this.generateAIResponse(
-        user,
-        phoneNumber,
-        message,
-        analysis,
-      ),
-    };
-  }
-
-  // =========================================================
-  // HUMAN
-  // =========================================================
-
-  async handleHuman(user, phoneNumber, message, analysis) {
-    return {
-      intent: 'HUMAN',
-      response: await this.generateAIResponse(
-        user,
-        phoneNumber,
-        message,
-        analysis,
-      ),
-    };
-  }
-
-  // =========================================================
-  // GREETING
-  // =========================================================
-
-  async handleGreeting(user, phoneNumber, message, analysis) {
-    return {
-      intent: 'GREETING',
-      response: await this.generateAIResponse(
-        user,
-        phoneNumber,
-        message,
-        analysis,
-      ),
-    };
-  }
-
-  // =========================================================
-  // AI RESPONSE
-  // =========================================================
-
-  async generateAIResponse(user, phoneNumber, message, analysis) {
-    try {
-      return await this.ai.generateResponse(message, analysis, {
-        businessName: user.business_name,
-
-        businessType: user.business_type,
-
-        timezone: user.business_timezone || 'Asia/Dubai',
-      });
-    } catch (err) {
-      console.error('Generate AI response error:', err.message);
-
-      return 'Sorry, I could not process your request.';
+      return this.formatDate(base);
     }
+
+    if (normalized === 'day after tomorrow') {
+      base.setDate(base.getDate() + 2);
+
+      return this.formatDate(base);
+    }
+
+    return null;
   }
 
-  // =========================================================
-  // NUMBER HELPER
-  // =========================================================
+  formatDate(date) {
+    return date.toISOString().split('T')[0];
+  }
+
+  // ==========================================
+  // NUMBER
+  // ==========================================
 
   toNumber(value) {
     if (value === null || value === undefined || value === '') {
@@ -807,125 +694,52 @@ class IntentHandler {
     return Number.isFinite(number) ? number : null;
   }
 
-  // =========================================================
-  // DATE RESOLUTION
-  // =========================================================
+  // ==========================================
+  // CANCEL
+  // ==========================================
 
-  resolveDateReference(reference, timezone = 'Asia/Dubai') {
-    if (!reference) {
-      return null;
-    }
+  async handleCancel(user, phoneNumber, analysis) {
+    await this.clearConversationState(user.id, phoneNumber);
 
-    const ref = String(reference).trim().toLowerCase();
-
-    // -----------------------------------------------------
-    // Current date in business timezone
-    // -----------------------------------------------------
-
-    const now = new Date();
-
-    const dateFormatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-
-    const todayString = dateFormatter.format(now);
-
-    const today = new Date(`${todayString}T12:00:00`);
-
-    // -----------------------------------------------------
-    // Semantic references normalized by AI
-    // -----------------------------------------------------
-
-    if (ref === 'today' || ref === 'same day') {
-      return this.formatDate(today);
-    }
-
-    if (ref === 'tomorrow' || ref === 'next day') {
-      const date = new Date(today);
-      date.setDate(date.getDate() + 1);
-
-      return this.formatDate(date);
-    }
-
-    if (ref === 'day after tomorrow') {
-      const date = new Date(today);
-      date.setDate(date.getDate() + 2);
-
-      return this.formatDate(date);
-    }
-
-    if (ref === 'yesterday') {
-      const date = new Date(today);
-      date.setDate(date.getDate() - 1);
-
-      return this.formatDate(date);
-    }
-
-    // -----------------------------------------------------
-    // "next monday", "next friday", etc.
-    //
-    // AI should normalize Arabic / Darija / French /
-    // Gulf Arabic into this semantic representation.
-    // -----------------------------------------------------
-
-    const weekdays = {
-      sunday: 0,
-      monday: 1,
-      tuesday: 2,
-      wednesday: 3,
-      thursday: 4,
-      friday: 5,
-      saturday: 6,
+    return {
+      intent: 'CANCEL',
+      response:
+        'Sure. I can help you cancel your appointment. Please provide the appointment details.',
     };
-
-    const match = ref.match(
-      /^(?:next\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/,
-    );
-
-    if (match) {
-      const target = weekdays[match[1]];
-
-      const current = today.getDay();
-
-      let diff = (target - current + 7) % 7;
-
-      if (diff === 0) {
-        diff = 7;
-      }
-
-      const date = new Date(today);
-
-      date.setDate(date.getDate() + diff);
-
-      return this.formatDate(date);
-    }
-
-    // -----------------------------------------------------
-    // Already normalized YYYY-MM-DD
-    // -----------------------------------------------------
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(ref)) {
-      return ref;
-    }
-
-    return null;
   }
 
-  // =========================================================
-  // FORMAT DATE
-  // =========================================================
+  // ==========================================
+  // MODIFY
+  // ==========================================
 
-  formatDate(date) {
-    const year = date.getFullYear();
+  async handleModify(user, phoneNumber, analysis) {
+    const state = await this.getConversationState(user.id, phoneNumber);
 
-    const month = String(date.getMonth() + 1).padStart(2, '0');
+    if (state?.booking) {
+      return {
+        intent: 'BOOKING',
+        response: 'Sure. What would you like to change about your appointment?',
+      };
+    }
 
-    const day = String(date.getDate()).padStart(2, '0');
+    return {
+      intent: 'MODIFY',
+      response: 'Sure. What would you like to change about your appointment?',
+    };
+  }
 
-    return `${year}-${month}-${day}`;
+  // ==========================================
+  // FAQ
+  // ==========================================
+
+  async handleFAQ(user, phoneNumber, message, analysis) {
+    return {
+      intent: 'FAQ',
+      response: await this.ai.generateResponse(message, analysis, {
+        businessName: user.business_name,
+        businessType: user.business_type,
+      }),
+    };
   }
 }
 
