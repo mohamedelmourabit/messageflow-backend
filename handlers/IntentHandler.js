@@ -122,6 +122,19 @@ class IntentHandler {
 
       const analysis = await this.ai.analyzeMessage(message, context);
 
+      // An active slot-selection flow has stronger business meaning than a
+      // generic FAQ label. This decision uses Claude's structured semantic
+      // follow-up flag, never a customer-message keyword or topic string.
+      if (
+        conversationState.status === 'WAITING_FOR_SLOT' &&
+        conversationState.service_id &&
+        conversationState.date &&
+        analysis.intent === 'FAQ' &&
+        analysis.booking_follow_up === true
+      ) {
+        analysis.intent = 'BOOKING';
+      }
+
       console.log('🧠 AI analysis:', JSON.stringify(analysis, null, 2));
 
       // -----------------------------------------------------

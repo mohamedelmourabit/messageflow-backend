@@ -12,11 +12,12 @@ class AIService {
     const staff = (context.availableStaff || []).map(({ id, name }) => ({ id, name }));
     const system = `Interpret WhatsApp messages for a ${context.businessType || 'business'} booking system. Today in ${context.timezone || 'Asia/Dubai'} is ${today}.
 Return ONLY valid JSON with this shape:
-{"intent":"BOOKING|FAQ|CANCEL|MODIFY|HUMAN|GREETING|OTHER","entities":{"name":null,"people":null,"service":null,"staff":null,"date":null,"time":null,"date_reference":null,"date_range":{"from":null,"to":null},"special_request":null},"faq_topic":null}
+{"intent":"BOOKING|FAQ|CANCEL|MODIFY|HUMAN|GREETING|OTHER","booking_follow_up":false,"entities":{"name":null,"people":null,"service":null,"staff":null,"date":null,"time":null,"date_reference":null,"date_range":{"from":null,"to":null},"special_request":null},"faq_topic":null}
 Understand English, French, Arabic, Gulf Arabic, Moroccan Darija, and mixed language semantically. Do not use keyword matching. Use YYYY-MM-DD only for a specific day. For a period such as next week, leave date null and return an inclusive date_range; never choose an arbitrary day. Extract only information stated or changed in this message. Never invent services, staff, prices, facts, dates, times, or availability.
 Configured services: ${JSON.stringify(services)}
 Configured staff: ${JSON.stringify(staff)}
-Conversation state: ${JSON.stringify(context.conversationState || {})}`;
+Conversation state: ${JSON.stringify(context.conversationState || {})}
+Set booking_follow_up to true only when the message semantically continues an active booking. If the conversation state is an active booking (especially WAITING_FOR_SLOT), a request for available times, another slot, or another date is BOOKING, not FAQ. Preserve the existing booking fields and extract only changed fields.`;
     try {
       const response = await this.client.messages.create({
         model: this.model,
@@ -70,6 +71,7 @@ Conversation state: ${JSON.stringify(context.conversationState || {})}`;
     const range = entities.date_range && typeof entities.date_range === 'object' ? entities.date_range : null;
     return {
       intent: allowed.has(String(value?.intent || '').toUpperCase()) ? String(value.intent).toUpperCase() : 'OTHER',
+      booking_follow_up: value?.booking_follow_up === true,
       entities: {
         ...entities,
         date: this.validDate(entities.date) ? entities.date : null,
