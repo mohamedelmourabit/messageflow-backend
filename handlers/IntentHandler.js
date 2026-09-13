@@ -306,6 +306,21 @@ class IntentHandler {
       // DATE
       // -----------------------------------------------------
 
+      const dateRange = entities.date_range || entities.dateRange || null;
+
+      // A semantic period replaces an old exact-date constraint. Do not turn
+      // it into a made-up Monday or retain the prior date from state.
+      if (dateRange?.from && dateRange?.to) {
+        return await this.handleBookingDateRange(
+          user,
+          phoneNumber,
+          message,
+          analysis,
+          conversationState,
+          dateRange,
+        );
+      }
+
       let bookingDate = entities.date || conversationState.date || null;
 
       const dateReference =
@@ -730,6 +745,57 @@ class IntentHandler {
   }
 
   // =========================================================
+  // SALON - SEMANTIC DATE RANGE AVAILABILITY
+  // =========================================================
+
+  async handleBookingDateRange(user, phoneNumber, message, analysis, state, range) {
+    const businessType = String(user.business_type || '').toLowerCase();
+    const isSalon = ['salon', 'hair', 'beauty', 'barber'].some((type) => businessType.includes(type));
+    if (!isSalon) {
+      await this.saveConversationState(user.id, phoneNumber, {
+        ...state, intent: 'BOOKING', status: 'WAITING_FOR_DATE_RANGE', date_range: range,
+      });
+      return { intent: 'BOOKING', response: 'Please choose a specific date and time within that period.' };
+    }
+
+    const requestedService = analysis.entities?.service || state.service;
+    const serviceId = state.service_id || await this.findServiceId(user.id, requestedService);
+    if (!serviceId) return this.showAvailableServices(user, phoneNumber, state);
+
+    const staffName = analysis.entities?.staff || state.staff;
+    const staffId = state.staff_id || (staffName ? await this.findStaffId(user.id, staffName) : null);
+    const slots = await this.booking.findSalonAvailabilityInRange(
+      user.id, range.from, range.to, serviceId, staffId, 5,
+    );
+    await this.saveConversationState(user.id, phoneNumber, {
+      ...state,
+      intent: 'BOOKING',
+      status: 'WAITING_FOR_SLOT',
+      service: requestedService,
+      service_id: serviceId,
+      staff: staffName || null,
+      staff_id: staffId,
+      date_range: range,
+      alternative_slots: slots.map((slot) => ({ date: slot.date, time: slot.startTime })),
+    });
+    if (!slots.length) {
+      return { intent: 'BOOKING', response: `I could not find an available ${requestedService} appointment between ${range.from} and ${range.to}. Would you like another period?` };
+    }
+    return {
+      intent: 'BOOKING',
+      response: `Here are available ${requestedService} appointments from ${range.from} to ${range.to}:\n\n${slots.map((slot) => `${slot.date} at ${slot.startTime}`).join('\n')}\n\nPlease choose one.`,
+      interactive: {
+        type: 'list', body: `Available ${requestedService} appointments:`, button: 'Choose a time',
+        items: slots.map((slot) => ({
+          id: `slot:${slot.date}:${slot.startTime}`,
+          item: `${slot.date} at ${slot.startTime}`,
+          description: slot.endTime ? `Available until ${slot.endTime}` : 'Available',
+        })),
+      },
+    };
+  }
+
+  // =========================================================
   // SHOW AVAILABLE SERVICES
   // =========================================================
 
@@ -973,104 +1039,9 @@ class IntentHandler {
       );
     }
 
-    // Natural language request for alternative times.
-    const normalized = text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '');
-
-    const asksForAlternatives = [
-      'when is it available',
-      'when is available',
-      'what time is available',
-      'what times are available',
-      'which times are available',
-      'any other time',
-      'another time',
-      'different time',
-      'what about another time',
-      'when can i come',
-      'when can i book',
-      'available time',
-      'available times',
-
-      'quand est ce disponible',
-      'quand est disponible',
-      'quelle heure est disponible',
-      'quelles heures sont disponibles',
-      'un autre horaire',
-      'une autre heure',
-      'une autre heure disponible',
-
-      'متى متاح',
-      'متى متوفر',
-      'متى متاحة',
-      'متى متوفرة',
-      'اي وقت متاح',
-      'أي وقت متاح',
-      'وقت اخر',
-      'وقت آخر',
-      'موعد اخر',
-      'موعد آخر',
-    ].some((phrase) => normalized.includes(phrase));
-
-    if (!asksForAlternatives) {
-      return null;
-    }
-
-    // IMPORTANT:
-    // Use the real service/date/state and ask the booking
-    // engine for REAL available slots.
-    const alternatives = await this.booking.findAlternativeSalonSlots(
-      user.id,
-      state.date,
-      state.time,
-      state.service_id,
-      state.staff_id || null,
-      5,
-    );
-
-    if (!alternatives.length) {
-      return {
-        intent: 'BOOKING',
-        response:
-          `I could not find another available time for ${state.service} on ${state.date}. ` +
-          'Would you like to choose another date?',
-      };
-    }
-
-    await this.saveConversationState(user.id, phoneNumber, {
-      ...state,
-      status: 'WAITING_FOR_SLOT',
-      alternative_slots: alternatives.map((slot) => slot.startTime),
-    });
-
-    return {
-      intent: 'BOOKING',
-
-      response:
-        `For ${state.service} on ${state.date}, these times are available:\n\n` +
-        alternatives.map((slot) => slot.startTime).join('\n') +
-        '\n\nPlease choose one.',
-
-      interactive: {
-        type: 'list',
-
-        body: `Available times for ${state.service} on ${state.date}:`,
-
-        button: 'Choose a time',
-
-        items: alternatives.map((slot) => ({
-          id: `slot:${slot.startTime}`,
-
-          item: slot.startTime,
-
-          description: slot.endTime
-            ? `Available until ${slot.endTime}`
-            : 'Available',
-        })),
-      },
-    };
+    // Any natural-language follow-up goes through the semantic interpreter.
+    // This intentionally avoids maintaining multilingual keyword dictionaries.
+    return null;
   }
 
   // =========================================================
@@ -1243,8 +1214,8 @@ class IntentHandler {
 
     if (payload.startsWith('slot:')) {
       const selectedTime = payload.substring('slot:'.length);
-
-      if (!/^\d{2}:\d{2}$/.test(selectedTime)) {
+      const datedSlot = selectedTime.match(/^(\d{4}-\d{2}-\d{2}):(\d{2}:\d{2})$/);
+      if (!datedSlot && !/^\d{2}:\d{2}$/.test(selectedTime)) {
         return null;
       }
 
@@ -1255,7 +1226,9 @@ class IntentHandler {
 
         status: 'SLOT_SELECTED',
 
-        time: selectedTime,
+        date: datedSlot ? datedSlot[1] : state.date,
+        time: datedSlot ? datedSlot[2] : selectedTime,
+        date_range: datedSlot ? undefined : state.date_range,
       };
 
       await this.saveConversationState(user.id, phoneNumber, nextState);
@@ -1961,6 +1934,15 @@ class IntentHandler {
       }
     }
 
+    const dateRange = entities.date_range || entities.dateRange;
+    if (dateRange?.from && dateRange?.to) {
+      next.date_range = { from: dateRange.from, to: dateRange.to };
+      delete next.date;
+      delete next.time;
+    } else if (entities.date) {
+      delete next.date_range;
+    }
+
     next.intent = analysis?.intent || next.intent;
 
     return next;
@@ -2061,6 +2043,7 @@ class IntentHandler {
   // =========================================================
 
   async handleFAQ(user, phoneNumber, message, analysis) {
+    const facts = await this.booking.getBusinessFacts(user.id);
     return {
       intent: 'FAQ',
 
@@ -2068,7 +2051,12 @@ class IntentHandler {
         user,
         phoneNumber,
         message,
-        analysis,
+        {
+          ...analysis,
+          // The response model receives this database-derived object only;
+          // absent facts must never be filled with plausible defaults.
+          faq_answer: facts,
+        },
       ),
     };
   }

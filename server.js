@@ -32,7 +32,7 @@ const STRIPE_PUBLIC_KEY = process.env.STRIPE_PUBLIC_KEY;
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_NUM = process.env.TWILIO_WHATSAPP_NUMBER;
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 // ============================================
 // DEBUG LOGGING
 // ============================================
@@ -41,7 +41,7 @@ console.log('DATABASE_URL:', DB_URL ? '✅ LOADED' : '❌ MISSING');
 console.log('JWT_SECRET:', JWT_SECRET ? '✅ LOADED' : '❌ MISSING');
 console.log('STRIPE_SECRET_KEY:', STRIPE_KEY ? '✅ LOADED' : '❌ MISSING');
 console.log('TWILIO_ACCOUNT_SID:', TWILIO_SID ? '✅ LOADED' : '❌ MISSING');
-console.log('ANTHROPIC_API_KEY:', ANTHROPIC_KEY ? '✅ LOADED' : '❌ MISSING');
+console.log('OPENAI_API_KEY:', OPENAI_KEY ? '✅ LOADED' : '❌ MISSING');
 console.log('');
 
 // ============================================
@@ -105,7 +105,7 @@ console.log('✅ Twilio: Initialized');
 // ============================================
 // INITIALIZE SERVICES
 // ============================================
-const aiService = new AIService(ANTHROPIC_KEY);
+const aiService = new AIService(OPENAI_KEY);
 const whatsappService = new WhatsAppService(twilioClient, pool, TWILIO_NUM);
 const bookingService = new BookingService(pool);
 const intentHandler = new IntentHandler({
@@ -189,6 +189,10 @@ const initDb = async () => {
         default_booking_duration_minutes INTEGER DEFAULT 90,
 
         allow_table_combination BOOLEAN DEFAULT false,
+
+        -- A simple restaurant mode. When set, it is the total number of
+        -- simultaneous guests that can be accepted; no table plan is needed.
+        restaurant_capacity INTEGER,
 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -408,6 +412,10 @@ const initDb = async () => {
   ALTER TABLE business_settings
   ADD COLUMN IF NOT EXISTS max_bookings_per_slot INTEGER DEFAULT 1;
 `);
+    await pool.query(`
+      ALTER TABLE business_settings
+      ADD COLUMN IF NOT EXISTS restaurant_capacity INTEGER;
+    `);
 
     // ==========================================
     // MESSAGES
@@ -700,6 +708,39 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
       bookings: bookings.rows,
       messages: messages.rows,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// A restaurant can use one total simultaneous-guest capacity without setting
+// up table types. Keep this setting deliberately small and deterministic.
+app.get('/api/business-settings', authMiddleware, async (req, res) => {
+  try {
+    const settings = await bookingService.getBusinessSettings(req.userId);
+    res.json(settings);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/business-settings', authMiddleware, async (req, res) => {
+  const { restaurant_capacity: restaurantCapacity } = req.body;
+  if (restaurantCapacity !== null && restaurantCapacity !== undefined &&
+      (!Number.isInteger(Number(restaurantCapacity)) || Number(restaurantCapacity) < 1)) {
+    return res.status(400).json({ error: 'restaurant_capacity must be a positive whole number or null' });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO business_settings (user_id, restaurant_capacity)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE
+       SET restaurant_capacity = EXCLUDED.restaurant_capacity,
+           updated_at = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [req.userId, restaurantCapacity === null || restaurantCapacity === undefined ? null : Number(restaurantCapacity)],
+    );
+    res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

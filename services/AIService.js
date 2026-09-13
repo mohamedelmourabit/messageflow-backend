@@ -1,539 +1,87 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const OpenAI = require('openai');
 
 class AIService {
-  constructor(apiKey) {
-    this.client = new Anthropic({
-      apiKey,
-    });
-
-    this.model = 'claude-haiku-4-5-20251001';
+  constructor(apiKey, model = process.env.OPENAI_MODEL || 'gpt-4o-mini') {
+    this.openai = new OpenAI({ apiKey });
+    this.model = model;
   }
 
-  /**
-   * Analyse complète d'un message WhatsApp en UN seul appel IA.
-   */
   async analyzeMessage(message, context = {}) {
+    const today = this.dateInTimezone(context.timezone || 'Asia/Dubai');
+    const catalog = (context.availableServices || []).map(({ id, name, description }) => ({ id, name, description: description || null }));
+    const staff = (context.availableStaff || []).map(({ id, name }) => ({ id, name }));
+    const prompt = `You interpret a WhatsApp message for a ${context.businessType || 'business'} booking system. Today in the business timezone (${context.timezone || 'Asia/Dubai'}) is ${today}.
+Return JSON only, matching this schema exactly:
+{"intent":"BOOKING|FAQ|CANCEL|MODIFY|HUMAN|GREETING|OTHER","entities":{"name":null,"people":null,"service":null,"staff":null,"date":null,"time":null,"date_reference":null,"date_range":{"from":null,"to":null},"special_request":null},"faq_topic":null}
+Interpret meaning in English, French, Arabic, Gulf Arabic, Moroccan Darija, and mixed language. Do not use keyword matching; infer meaning. Use YYYY-MM-DD only for a specific requested day. For “next week”, “this weekend”, “later this month”, or any period, leave date null and return its inclusive real calendar range in date_range. Never turn a range into an arbitrary single day. Extract only fields stated or changed in this message; never invent services, staff, prices, facts, dates, times, or availability.
+Services actually configured: ${JSON.stringify(catalog)}
+Staff actually configured: ${JSON.stringify(staff)}
+Current conversation state: ${JSON.stringify(context.conversationState || {})}`;
     try {
-      const currentDate =
-        context.currentDate || new Date().toISOString().split('T')[0];
-
-      const timezone = context.timezone || 'Asia/Dubai';
-      const businessName = context.businessName || 'the business';
-      const businessType = context.businessType || 'business';
-
-      const conversationState = context.conversationState || {};
-
-      const availableServices = Array.isArray(context.availableServices)
-        ? context.availableServices
-        : [];
-
-      const availableStaff = Array.isArray(context.availableStaff)
-        ? context.availableStaff
-        : [];
-
-      const prompt = `
-You are the multilingual WhatsApp AI assistant for "${businessName}".
-
-BUSINESS TYPE:
-${businessType}
-
-Your job is to UNDERSTAND the customer's message semantically.
-
-IMPORTANT:
-- Customers may speak English, Arabic, Gulf Arabic, UAE Arabic, Moroccan Darija, French, or mixed languages.
-- Understand natural language semantically.
-- Do NOT rely on keyword dictionaries.
-- Understand natural ways people express services, dates, times, quantities and requests.
-- Never invent information.
-- Never invent a service or staff member that is not provided in the business data.
-- If something is not provided or cannot be understood with confidence, return null.
-
-CURRENT DATE:
-${currentDate}
-
-BUSINESS TIMEZONE:
-${timezone}
-
-AVAILABLE SERVICES:
-${JSON.stringify(availableServices)}
-
-AVAILABLE STAFF:
-${JSON.stringify(availableStaff)}
-
-CURRENT CONVERSATION STATE:
-${JSON.stringify(conversationState)}
-
-CUSTOMER MESSAGE:
-${message}
-
-VERY IMPORTANT CONVERSATION RULE:
-
-If CURRENT CONVERSATION STATE contains an active booking/reservation,
-the customer is continuing that booking unless they clearly say they want to:
-- cancel it
-- modify an existing confirmed booking
-- speak to a human
-- ask an unrelated FAQ
-
-Short follow-up messages such as:
-- "Monday"
-- "6pm"
-- "4 people"
-- "my name is Ahmed"
-- "I told you Monday"
-- "yes"
-- "first booking"
-- "for me"
-must be interpreted using the existing conversation state.
-
-DO NOT reset or erase information already present in CURRENT CONVERSATION STATE.
-
-Extract only NEW information from the current message.
-
-If the customer provides a missing booking field while a booking is active,
-intent MUST normally remain BOOKING.
-
-DATE RULES:
-
-If the customer clearly refers to a specific calendar date or weekday:
-- Resolve it using CURRENT DATE and BUSINESS TIMEZONE.
-- Return the resolved date as YYYY-MM-DD when possible.
-- "tomorrow" must be resolved to the actual YYYY-MM-DD date.
-- "Monday" must be resolved to the appropriate upcoming Monday.
-- "next Friday" must be resolved to the appropriate YYYY-MM-DD date.
-- date_reference may still contain the original semantic meaning.
-
-TIME RULES:
-
-- "7pm" -> "19:00"
-- "8:30 PM" -> "20:30"
-- "1PM" -> "13:00"
-- "around 8" -> time_reference = "around 8", time = null
-- Never invent an exact time.
-
-SERVICE RULE:
-
-If the customer wants a service:
-- Match it against AVAILABLE SERVICES.
-- Return the canonical service name exactly as provided in AVAILABLE SERVICES.
-- If the requested service does NOT exist in AVAILABLE SERVICES, return service = null.
-- NEVER invent a service.
-- NEVER replace a missing service with another service.
-
-STAFF RULE:
-
-If the customer explicitly requests a staff member:
-- Match it against AVAILABLE STAFF.
-- Return the canonical staff name exactly as provided in AVAILABLE STAFF.
-- If the requested staff member does NOT exist in AVAILABLE STAFF, return staff = null.
-- NEVER invent a staff member.
-
-BOOKING RULE:
-
-For a salon:
-- service is normally required
-- date is required
-- time is required
-- customer name is required
-
-For a restaurant:
-- people is normally required
-- date is required
-- time is required
-- customer name is required
-
-PHONE:
-
-The customer's WhatsApp phone is already known by the backend.
-Do not ask for it.
-Only return phone if the customer explicitly provides another phone number.
-
-OUTPUT RULE:
-
-Return ONLY ONE valid JSON object.
-
-DO NOT:
-- add explanations
-- add markdown
-- add \`\`\`json
-- add text before the JSON
-- add text after the JSON
-- return multiple JSON objects
-
-Use exactly this structure:
-
-{
-  "language": "en",
-  "intent": "BOOKING",
-  "confidence": 0.0,
-  "entities": {
-    "people": null,
-    "date": null,
-    "date_reference": null,
-    "time": null,
-    "time_reference": null,
-    "name": null,
-    "phone": null,
-    "service": null,
-    "staff": null
-  },
-  "special_request": null,
-  "question": null
-}
-
-LANGUAGE:
-- "en" = English
-- "ar" = Arabic, Gulf Arabic, UAE Arabic or Moroccan Darija
-- "fr" = French
-- "mixed" = genuinely mixed languages
-- "other" = otherwise
-
-INTENT:
-
-BOOKING:
-Customer wants to make a reservation or appointment,
-or is clearly continuing an active booking conversation.
-
-FAQ:
-Customer asks about the business, services, prices, opening hours,
-location, parking, etc.
-
-CANCEL:
-Customer wants to cancel an existing reservation.
-
-MODIFY:
-Customer wants to modify an EXISTING CONFIRMED reservation.
-
-HUMAN:
-Customer explicitly wants a human/person/staff member.
-
-GREETING:
-Simple greeting without another request.
-
-OTHER:
-Anything else.
-
-Do not confuse a booking follow-up with MODIFY.
-
-Example:
-
-CURRENT STATE:
-{
-  "intent": "BOOKING",
-  "date": null
-}
-
-CUSTOMER:
-"Monday"
-
-Correct:
-{
-  "intent": "BOOKING",
-  "entities": {
-    "date": "YYYY-MM-DD",
-    "date_reference": "Monday"
-  }
-}
-
-NOT MODIFY.
-
-Another example:
-
-CURRENT STATE:
-{
-  "intent": "BOOKING",
-  "service": "Facial",
-  "date": "YYYY-MM-DD"
-}
-
-CUSTOMER:
-"6pm"
-
-Correct:
-BOOKING with time = "18:00".
-
-NOT MODIFY.
-`;
-
-      const response = await this.client.messages.create({
+      const response = await this.openai.chat.completions.create({
         model: this.model,
-        max_tokens: 1000,
         temperature: 0,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'system', content: prompt }, { role: 'user', content: String(message || '') }],
       });
-
-      const text = response.content
-        ?.filter((item) => item.type === 'text')
-        .map((item) => item.text)
-        .join('')
-        .trim();
-
-      if (!text) {
-        throw new Error('Empty AI response');
-      }
-
-      console.log('🤖 Claude raw response:', text);
-
-      /**
-       * Robust JSON extraction.
-       *
-       * Claude can occasionally return:
-       *
-       * {
-       *   ...
-       * }
-       * extra text
-       *
-       * Instead of JSON.parse() on the entire response,
-       * extract only the first complete JSON object.
-       */
-      let rawText = text
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
-
-      const firstBrace = rawText.indexOf('{');
-
-      if (firstBrace === -1) {
-        throw new Error(`Claude did not return a JSON object: ${rawText}`);
-      }
-
-      let depth = 0;
-      let end = -1;
-      let inString = false;
-      let escaped = false;
-
-      for (let i = firstBrace; i < rawText.length; i++) {
-        const char = rawText[i];
-
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-
-        if (char === '\\' && inString) {
-          escaped = true;
-          continue;
-        }
-
-        if (char === '"') {
-          inString = !inString;
-          continue;
-        }
-
-        if (inString) {
-          continue;
-        }
-
-        if (char === '{') {
-          depth++;
-        } else if (char === '}') {
-          depth--;
-
-          if (depth === 0) {
-            end = i + 1;
-            break;
-          }
-        }
-      }
-
-      if (end === -1) {
-        throw new Error(`Incomplete JSON from Claude: ${rawText}`);
-      }
-
-      const jsonText = rawText.substring(firstBrace, end);
-
-      console.log('🧩 JSON extracted:', jsonText);
-
-      const analysis = JSON.parse(jsonText);
-
-      console.log('✅ Parsed AI analysis:', JSON.stringify(analysis, null, 2));
-
-      return this.normalizeAnalysis(analysis);
+      return this.normalizeAnalysis(JSON.parse(response.choices[0].message.content));
     } catch (error) {
-      console.error('❌ AI analyzeMessage error:', error.message);
-
-      return {
-        language: 'en',
-        intent: 'OTHER',
-        confidence: 0,
-        entities: {
-          people: null,
-          date: null,
-          date_reference: null,
-          time: null,
-          time_reference: null,
-          name: null,
-          phone: null,
-          service: null,
-          staff: null,
-        },
-        special_request: null,
-        question: null,
-      };
+      console.error('AI analysis error:', error.message);
+      return { intent: 'HUMAN', entities: {}, faq_topic: null };
     }
   }
 
-  /**
-   * Sécurise et normalise la réponse IA.
-   */
-  normalizeAnalysis(data) {
-    const validIntents = [
-      'BOOKING',
-      'FAQ',
-      'CANCEL',
-      'MODIFY',
-      'HUMAN',
-      'GREETING',
-      'OTHER',
-    ];
+  // Natural-language wording only; the handler supplies all business facts.
+  async generateResponse(message, analysis = {}, context = {}) {
+    const safeContext = {
+      businessName: context.businessName || null,
+      businessType: context.businessType || null,
+      missing_information: analysis.missing_information || [],
+      booking_available: analysis.booking_available,
+      booking_confirmed: analysis.booking_confirmed,
+      availability_reason: analysis.availability_reason || null,
+      booking: analysis.booking || null,
+      faq_answer: analysis.faq_answer || null,
+      staff_not_found: analysis.staff_not_found || null,
+    };
+    const prompt = `Write one short WhatsApp response in the customer's language when possible. Use only the facts in CONTEXT. Do not invent services, prices, opening hours, staff, availability, booking confirmation, or business information. If faq_answer is null, say that information is not available and offer human help. CONTEXT: ${JSON.stringify(safeContext)}`;
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: this.model,
+        temperature: 0.2,
+        max_tokens: 160,
+        messages: [{ role: 'system', content: prompt }, { role: 'user', content: String(message || '') }],
+      });
+      return response.choices[0].message.content?.trim();
+    } catch (error) {
+      console.error('AI response error:', error.message);
+      return 'Sorry, I could not process that right now. Please try again.';
+    }
+  }
 
-    const validLanguages = ['en', 'ar', 'fr', 'mixed', 'other'];
-
-    const entities = data.entities || {};
-
+  normalizeAnalysis(value) {
+    const allowed = new Set(['BOOKING', 'FAQ', 'CANCEL', 'MODIFY', 'HUMAN', 'GREETING', 'OTHER']);
+    const entities = value?.entities && typeof value.entities === 'object' ? value.entities : {};
+    const range = entities.date_range && typeof entities.date_range === 'object' ? entities.date_range : null;
     return {
-      language: validLanguages.includes(data.language) ? data.language : 'en',
-
-      intent: validIntents.includes(data.intent) ? data.intent : 'OTHER',
-
-      confidence:
-        typeof data.confidence === 'number'
-          ? Math.max(0, Math.min(1, data.confidence))
-          : 0,
-
+      intent: allowed.has(String(value?.intent || '').toUpperCase()) ? String(value.intent).toUpperCase() : 'OTHER',
       entities: {
-        people:
-          Number.isInteger(entities.people) && entities.people > 0
-            ? entities.people
-            : null,
-
-        date:
-          typeof entities.date === 'string' && entities.date.length > 0
-            ? entities.date
-            : null,
-
-        date_reference:
-          typeof entities.date_reference === 'string' &&
-          entities.date_reference.length > 0
-            ? entities.date_reference
-            : null,
-
-        time:
-          typeof entities.time === 'string' &&
-          /^\d{2}:\d{2}$/.test(entities.time)
-            ? entities.time
-            : null,
-
-        time_reference:
-          typeof entities.time_reference === 'string' &&
-          entities.time_reference.length > 0
-            ? entities.time_reference
-            : null,
-
-        name:
-          typeof entities.name === 'string' && entities.name.length > 0
-            ? entities.name
-            : null,
-
-        phone:
-          typeof entities.phone === 'string' && entities.phone.length > 0
-            ? entities.phone
-            : null,
-
-        service:
-          typeof entities.service === 'string' && entities.service.length > 0
-            ? entities.service
-            : null,
-
-        staff:
-          typeof entities.staff === 'string' && entities.staff.length > 0
-            ? entities.staff
-            : null,
+        ...entities,
+        date: this.validDate(entities.date) ? entities.date : null,
+        time: this.validTime(entities.time) ? entities.time : null,
+        date_range: range && this.validDate(range.from) && this.validDate(range.to) && range.from <= range.to ? { from: range.from, to: range.to } : null,
       },
-
-      special_request:
-        typeof data.special_request === 'string' &&
-        data.special_request.length > 0
-          ? data.special_request
-          : null,
-
-      question:
-        typeof data.question === 'string' && data.question.length > 0
-          ? data.question
-          : null,
+      faq_topic: value?.faq_topic || null,
     };
   }
 
-  /**
-   * Génère une réponse dans la langue du client.
-   */
-  async generateResponse(message, analysis, businessInfo = {}) {
-    try {
-      const language = analysis?.language || 'en';
+  validDate(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value); }
+  validTime(value) { return typeof value === 'string' && /^\d{2}:\d{2}$/.test(value); }
 
-      const businessName = businessInfo.businessName || 'the business';
-
-      const prompt = `
-You are the WhatsApp customer assistant for "${businessName}".
-
-Reply naturally to the customer.
-
-CUSTOMER LANGUAGE:
-${language}
-
-CUSTOMER MESSAGE:
-${message}
-
-CUSTOMER ANALYSIS:
-${JSON.stringify(analysis)}
-
-IMPORTANT:
-- Reply in the customer's language.
-- If Arabic, use natural Arabic appropriate for the customer's dialect/style.
-- For UAE customers, Gulf/UAE-style Arabic is acceptable.
-- For Moroccan customers, Moroccan Darija is acceptable when appropriate.
-- If the customer uses English, reply in English.
-- If the customer uses French, reply in French.
-- If the message mixes languages, reply naturally in the dominant language.
-- Be concise and friendly.
-- Usually 1-3 short sentences.
-- Never invent business information.
-- Never invent opening hours, prices, availability or policies.
-- Never claim that a booking is confirmed unless the backend explicitly confirms it.
-- Do not mention AI.
-`;
-
-      const response = await this.client.messages.create({
-        model: this.model,
-        max_tokens: 500,
-        temperature: 0.3,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-      });
-
-      const text = response.content
-        ?.filter((item) => item.type === 'text')
-        .map((item) => item.text)
-        .join('')
-        .trim();
-
-      return text || null;
-    } catch (error) {
-      console.error('AI generateResponse error:', error.message);
-
-      return null;
-    }
+  dateInTimezone(timezone) {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+    const get = (type) => parts.find((part) => part.type === type)?.value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
   }
 }
 

@@ -86,6 +86,21 @@ class BookingService {
     return result.rows;
   }
 
+  async getBusinessFacts(userId) {
+    const [services, hours] = await Promise.all([
+      this.getServices(userId),
+      this.db.query(
+        `SELECT day_of_week, is_open, open_time, close_time
+         FROM opening_hours WHERE user_id = $1 ORDER BY day_of_week ASC`,
+        [userId],
+      ),
+    ]);
+    return {
+      services: services.map(({ name, description, duration_minutes, price }) => ({ name, description, duration_minutes, price })),
+      opening_hours: hours.rows,
+    };
+  }
+
   // =========================================================
   // CREATE BOOKING
   // =========================================================
@@ -316,6 +331,27 @@ class BookingService {
         }
       }
 
+      // Restaurants can start with a single, explicit guest capacity instead
+      // of configuring table types. This is the authoritative capacity check.
+      const capacity = Number(settings.restaurant_capacity || 0);
+      if (capacity > 0) {
+        const occupied = await this.db.query(
+          `SELECT COALESCE(SUM(people), 0)::int AS people
+           FROM bookings
+           WHERE user_id = $1
+             AND booking_date = $2
+             AND status != 'cancelled'
+             AND start_time < $4
+             AND end_time > $3`,
+          [userId, bookingDate, startTime, endTime],
+        );
+        const used = Number(occupied.rows[0]?.people || 0);
+        if (used + Number(people) > capacity) {
+          return { available: false, reason: 'RESTAURANT_CAPACITY_REACHED' };
+        }
+        return { available: true, tableType: null, capacity, occupied: used };
+      }
+
       // -----------------------------------------------------
       // Find table
       // -----------------------------------------------------
@@ -423,6 +459,23 @@ class BookingService {
         );
 
         staff = staffResult.rows;
+      }
+
+      // Staff are optional. With no staff configured, salon appointments use
+      // the business's configured slot capacity just like a service business.
+      if (!requestedStaffId && staff.length === 0) {
+        const slot = await this.checkSlotAvailability(
+          userId,
+          bookingDate,
+          startTime,
+          endTime,
+        );
+        return {
+          available: slot.available,
+          staff: null,
+          serviceId,
+          reason: slot.available ? null : 'NO_SLOT_AVAILABLE',
+        };
       }
 
       // -----------------------------------------------------
@@ -674,6 +727,60 @@ class BookingService {
       console.error('Find alternative salon slots error:', err.message);
       return [];
     }
+  }
+
+  // Finds real appointment slots over an inclusive date range. It deliberately
+  // returns dates with times instead of selecting an arbitrary day from a
+  // customer phrase such as “next week”.
+  async findSalonAvailabilityInRange(userId, fromDate, toDate, serviceId, requestedStaffId = null, limit = 5) {
+    if (!fromDate || !toDate || !serviceId || fromDate > toDate) return [];
+    const serviceResult = await this.db.query(
+      `SELECT * FROM services WHERE id = $1 AND user_id = $2 AND COALESCE(active, true) = true LIMIT 1`,
+      [serviceId, userId],
+    );
+    const service = serviceResult.rows[0];
+    if (!service) return [];
+    const settings = await this.getBusinessSettings(userId);
+    const duration = Number(service.duration_minutes || 60);
+    const results = [];
+    const cursor = new Date(`${fromDate}T12:00:00Z`);
+    const last = new Date(`${toDate}T12:00:00Z`);
+    while (cursor <= last && results.length < limit) {
+      const date = cursor.toISOString().slice(0, 10);
+      const advanceCheck = await this.db.query(
+        `SELECT ($1::date <= CURRENT_DATE + $2::integer) AS valid`,
+        [date, Number(settings.max_booking_advance_days || 30)],
+      );
+      if (!advanceCheck.rows[0]?.valid) {
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+        continue;
+      }
+      const hoursResult = await this.db.query(
+        `SELECT open_time, close_time, is_open FROM opening_hours
+         WHERE user_id = $1 AND day_of_week = EXTRACT(DOW FROM $2::date)::int LIMIT 1`,
+        [userId, date],
+      );
+      const opening = hoursResult.rows[0];
+      if (opening?.is_open !== false) {
+        const open = opening?.open_time ? this.timeToMinutes(opening.open_time) : 0;
+        const close = opening?.close_time ? this.timeToMinutes(opening.close_time) : 24 * 60;
+        for (let minutes = open; minutes + duration <= close && results.length < limit; minutes += 30) {
+          const startTime = this.minutesToTime(minutes);
+          if (Number(settings.min_booking_notice_minutes || 0) > 0) {
+            const notice = await this.db.query(
+              `SELECT (($1::date + $2::time) >= NOW() + ($3::integer * INTERVAL '1 minute')) AS valid`,
+              [date, startTime, Number(settings.min_booking_notice_minutes)],
+            );
+            if (!notice.rows[0]?.valid) continue;
+          }
+          const endTime = this.calculateEndTime(startTime, duration);
+          const availability = await this.checkSalonAvailability(userId, date, startTime, endTime, service.id, requestedStaffId);
+          if (availability.available) results.push({ date, startTime, endTime, service, staff: availability.staff });
+        }
+      }
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+    return results;
   }
 
   timeToMinutes(value) {
