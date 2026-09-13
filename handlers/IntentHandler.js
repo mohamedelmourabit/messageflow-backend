@@ -44,7 +44,25 @@ class IntentHandler {
         user.id,
         phoneNumber,
       );
+      // -----------------------------------------------------
+      // ACTIVE ALTERNATIVE-SLOT FOLLOW-UP
+      // -----------------------------------------------------
+      if (
+        conversationState.status === 'WAITING_FOR_SLOT' &&
+        conversationState.service_id &&
+        conversationState.date
+      ) {
+        const alternativeResult = await this.handleAlternativeSlotFollowUp(
+          user,
+          phoneNumber,
+          message,
+          conversationState,
+        );
 
+        if (alternativeResult) {
+          return alternativeResult;
+        }
+      }
       // -----------------------------------------------------
       // HANDLE WAITING STATES WITHOUT AI
       // -----------------------------------------------------
@@ -910,6 +928,250 @@ class IntentHandler {
         response: `Great, ${selected.name} selected. What date and time would you prefer?`,
       };
     }
+
+    // =========================================================
+// ALTERNATIVE SLOT FOLLOW-UP
+// =========================================================
+
+async handleAlternativeSlotFollowUp(
+  user,
+  phoneNumber,
+  message,
+  state,
+) {
+  const text = String(message || '').trim();
+
+  if (!text) {
+    return null;
+  }
+
+  // Customer directly gives a time:
+  // "14:00", "2pm", "2 PM", "14h30", etc.
+  const parsedTime = this.parseTimeInput(text);
+
+  if (parsedTime) {
+    const nextState = {
+      ...state,
+      status: 'SLOT_SELECTED',
+      time: parsedTime,
+    };
+
+    await this.saveConversationState(
+      user.id,
+      phoneNumber,
+      nextState,
+    );
+
+    return await this.processSalonAvailabilityAfterSelection(
+      user,
+      phoneNumber,
+      message,
+      nextState,
+    );
+  }
+
+  // Natural language request for alternative times.
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const asksForAlternatives = [
+    'when is it available',
+    'when is available',
+    'what time is available',
+    'what times are available',
+    'which times are available',
+    'any other time',
+    'another time',
+    'different time',
+    'what about another time',
+    'when can i come',
+    'when can i book',
+    'available time',
+    'available times',
+
+    'quand est ce disponible',
+    'quand est disponible',
+    'quelle heure est disponible',
+    'quelles heures sont disponibles',
+    'un autre horaire',
+    'une autre heure',
+    'une autre heure disponible',
+
+    'متى متاح',
+    'متى متوفر',
+    'متى متاحة',
+    'متى متوفرة',
+    'اي وقت متاح',
+    'أي وقت متاح',
+    'وقت اخر',
+    'وقت آخر',
+    'موعد اخر',
+    'موعد آخر',
+  ].some((phrase) => normalized.includes(phrase));
+
+  if (!asksForAlternatives) {
+    return null;
+  }
+
+  // IMPORTANT:
+  // Use the real service/date/state and ask the booking
+  // engine for REAL available slots.
+  const alternatives =
+    await this.booking.findAlternativeSalonSlots(
+      user.id,
+      state.date,
+      state.time,
+      state.service_id,
+      state.staff_id || null,
+      5,
+    );
+
+  if (!alternatives.length) {
+    return {
+      intent: 'BOOKING',
+      response:
+        `I could not find another available time for ${state.service} on ${state.date}. ` +
+        'Would you like to choose another date?',
+    };
+  }
+
+  await this.saveConversationState(
+    user.id,
+    phoneNumber,
+    {
+      ...state,
+      status: 'WAITING_FOR_SLOT',
+      alternative_slots: alternatives.map(
+        (slot) => slot.startTime,
+      ),
+    },
+  );
+
+  return {
+    intent: 'BOOKING',
+
+    response:
+      `For ${state.service} on ${state.date}, these times are available:\n\n` +
+      alternatives
+        .map((slot) => slot.startTime)
+        .join('\n') +
+      '\n\nPlease choose one.',
+
+    interactive: {
+      type: 'list',
+
+      body:
+        `Available times for ${state.service} on ${state.date}:`,
+
+      button: 'Choose a time',
+
+      items: alternatives.map((slot) => ({
+        id: `slot:${slot.startTime}`,
+
+        item: slot.startTime,
+
+        description: slot.endTime
+          ? `Available until ${slot.endTime}`
+          : 'Available',
+      })),
+    },
+  };
+}
+
+
+// =========================================================
+// PARSE TIME INPUT
+// =========================================================
+
+parseTimeInput(value) {
+  const text = String(value || '')
+    .trim()
+    .toLowerCase();
+
+  // Examples:
+  // 14:30
+  // 14h30
+  // 2:30pm
+  // 2h30 pm
+  let match = text.match(
+    /^(\d{1,2})(?::|h)(\d{2})\s*(am|pm)?$/i,
+  );
+
+  if (match) {
+    let hour = Number(match[1]);
+    const minute = Number(match[2]);
+    const meridiem = match[3]?.toLowerCase();
+
+    if (minute > 59) {
+      return null;
+    }
+
+    if (meridiem === 'pm' && hour < 12) {
+      hour += 12;
+    }
+
+    if (meridiem === 'am' && hour === 12) {
+      hour = 0;
+    }
+
+    if (hour > 23) {
+      return null;
+    }
+
+    return `${String(hour).padStart(2, '0')}:${String(
+      minute,
+    ).padStart(2, '0')}`;
+  }
+
+  // Examples:
+  // 2pm
+  // 7 PM
+  match = text.match(
+    /^(\d{1,2})\s*(am|pm)$/i,
+  );
+
+  if (match) {
+    let hour = Number(match[1]);
+    const meridiem = match[2].toLowerCase();
+
+    if (hour < 1 || hour > 12) {
+      return null;
+    }
+
+    if (meridiem === 'pm' && hour < 12) {
+      hour += 12;
+    }
+
+    if (meridiem === 'am' && hour === 12) {
+      hour = 0;
+    }
+
+    return `${String(hour).padStart(2, '0')}:00`;
+  }
+
+  // Example:
+  // 14:00
+  match = text.match(
+    /^(\d{1,2}):(\d{2})$/,
+  );
+
+  if (match) {
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+
+    if (hour > 23 || minute > 59) {
+      return null;
+    }
+
+    return `${String(hour).padStart(2, '0')}:${String(
+      minute,
+    ).padStart(2, '0')}`;
+  }
+
+  return null;
+}
 
     // -----------------------------------------------------
     // CHECK AVAILABILITY
