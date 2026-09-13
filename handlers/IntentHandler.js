@@ -1544,15 +1544,19 @@ class IntentHandler {
         };
       }
 
+      const listBody = `That time is not available. Available times: ${alternatives
+        .map((slot) => slot.startTime)
+        .join(', ')}. Reply with the time you prefer.`;
+
       return {
         intent: 'BOOKING',
 
-        response: 'That time is not available. Please choose another time:',
+        response: listBody,
 
         interactive: {
           type: 'list',
 
-          body: 'That time is not available. Please choose another time:',
+          body: listBody,
 
           button: 'Choose a time',
 
@@ -1704,15 +1708,23 @@ class IntentHandler {
       };
     }
 
+    const listBody = `The requested time ${bookingTime} is not available. Available times: ${alternatives
+      .map((slot) => slot.startTime)
+      .join(', ')}. Reply with the time you prefer.`;
+
     return {
       intent: 'BOOKING',
 
-      response: `The requested time ${bookingTime} is not available. Please choose another time:`,
+      // The plain text always spells out every time, not just the
+      // interactive list - a sandbox WhatsApp number or a client that can't
+      // render twilio/list-picker must not leave the customer with no
+      // usable options.
+      response: listBody,
 
       interactive: {
         type: 'list',
 
-        body: `The requested time ${bookingTime} is not available. Please choose another time:`,
+        body: listBody,
 
         button: 'Choose a time',
 
@@ -1962,15 +1974,23 @@ class IntentHandler {
       };
     }
 
+    const listBody = `The requested time ${bookingTime} is not available. Available times: ${alternatives
+      .map((slot) => slot.startTime)
+      .join(', ')}. Reply with the time you prefer.`;
+
     return {
       intent: 'BOOKING',
 
-      response: `The requested time ${bookingTime} is not available. Please choose another time:`,
+      // The plain text always spells out every time, not just the
+      // interactive list - a sandbox WhatsApp number or a client that can't
+      // render twilio/list-picker must not leave the customer with no
+      // usable options.
+      response: listBody,
 
       interactive: {
         type: 'list',
 
-        body: `The requested time ${bookingTime} is not available. Please choose another time:`,
+        body: listBody,
 
         button: 'Choose a time',
 

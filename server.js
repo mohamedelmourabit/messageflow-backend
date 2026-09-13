@@ -914,6 +914,17 @@ app.post('/whatsapp/webhook', async (req, res) => {
         from,
         result.interactive,
       );
+
+      // Some senders (e.g. the Twilio WhatsApp sandbox) cannot render
+      // twilio/list-picker. Never leave the customer with no message at
+      // all - the plain response text already spells out every option.
+      if (!sent.success) {
+        sent = await whatsappService.sendMessage(
+          user.phone_number,
+          from,
+          response,
+        );
+      }
     } else {
       sent = await whatsappService.sendMessage(
         user.phone_number,
