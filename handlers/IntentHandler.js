@@ -128,11 +128,29 @@ class IntentHandler {
       if (
         conversationState.status === 'WAITING_FOR_SLOT' &&
         conversationState.service_id &&
-        conversationState.date &&
+        (conversationState.date || conversationState.date_range) &&
         analysis.intent === 'FAQ' &&
         analysis.booking_follow_up === true
       ) {
         analysis.intent = 'BOOKING';
+      }
+
+      // A short semantic follow-up after an unsuccessful range search has no
+      // new date to search yet. Keep it in booking and ask only for the next
+      // booking choice; do not fall through to an unrelated FAQ response.
+      if (
+        conversationState.status === 'WAITING_FOR_SLOT' &&
+        conversationState.service_id &&
+        conversationState.date_range &&
+        analysis.booking_follow_up === true &&
+        !analysis.entities?.date &&
+        !analysis.entities?.date_range &&
+        !analysis.entities?.dateRange
+      ) {
+        return {
+          intent: 'BOOKING',
+          response: `I still do not have an available ${conversationState.service} appointment from ${conversationState.date_range.from} to ${conversationState.date_range.to}. Please send another date or period you would prefer.`,
+        };
       }
 
       console.log('🧠 AI analysis:', JSON.stringify(analysis, null, 2));
@@ -495,6 +513,15 @@ class IntentHandler {
   // =========================================================
 
   async handleSalonBooking(user, phoneNumber, message, analysis, data) {
+    return this.handleSalonAvailabilityMvp(
+      user,
+      phoneNumber,
+      message,
+      analysis,
+      data,
+    );
+
+    /* Legacy service-based flow retained below temporarily for migration. */
     const {
       customerName,
       customerPhone,
@@ -768,6 +795,70 @@ class IntentHandler {
   }
 
   // =========================================================
+  // SALON MVP - AVAILABILITY ONLY
+  // =========================================================
+
+  async handleSalonAvailabilityMvp(user, phoneNumber, message, analysis, data) {
+    const { customerName, customerPhone, bookingDate, bookingTime, specialRequest } = data;
+    const entities = analysis.entities || {};
+    const currentState = await this.getConversationState(user.id, phoneNumber);
+    const requestedStaff = entities.staff || entities.staff_name || entities.staffName || currentState.staff || null;
+    let staffId = null;
+    if (requestedStaff) {
+      staffId = await this.findStaffId(user.id, requestedStaff);
+      if (!staffId) {
+        return { intent: 'BOOKING', response: 'That staff member is not available. Please choose another time.' };
+      }
+    }
+
+    const availability = await this.booking.findSalonSlotAvailability(
+      user.id, bookingDate, bookingTime, staffId,
+    );
+    if (!availability.available) {
+      return this.handleUnavailableSalonSlot(user, phoneNumber, message, analysis, {
+        bookingDate, bookingTime, serviceId: null, staffId, requestedService: null,
+      });
+    }
+
+    const nextState = {
+      ...currentState,
+      intent: 'BOOKING',
+      status: 'WAITING_FOR_NAME',
+      service: null,
+      service_id: null,
+      staff: availability.staff?.name || requestedStaff || null,
+      staff_id: availability.staff?.id || staffId || null,
+      date: bookingDate,
+      time: bookingTime,
+      special_request: specialRequest,
+    };
+    await this.saveConversationState(user.id, phoneNumber, nextState);
+
+    if (!customerName) {
+      return { intent: 'BOOKING', response: `That time is available. What name should I use for the booking?` };
+    }
+
+    const result = await this.booking.createBooking(
+      user.id, customerName, customerPhone, 1, bookingDate, bookingTime,
+      { endTime: availability.endTime, staffId: availability.staff?.id || staffId || null, specialRequest },
+    );
+    if (!result.success) {
+      return { intent: 'BOOKING', response: 'Sorry, I could not confirm your appointment.' };
+    }
+    await this.clearConversationState(user.id, phoneNumber);
+    return {
+      intent: 'BOOKING',
+      response: await this.generateAIResponse(user, phoneNumber, message, {
+        ...analysis,
+        booking_available: true,
+        booking_confirmed: true,
+        booking: { id: result.booking.id, date: bookingDate, time: bookingTime, end_time: availability.endTime, staff: availability.staff?.name || null },
+      }),
+      booking: result.booking,
+    };
+  }
+
+  // =========================================================
   // SALON - SEMANTIC DATE RANGE AVAILABILITY
   // =========================================================
 
@@ -781,34 +872,30 @@ class IntentHandler {
       return { intent: 'BOOKING', response: 'Please choose a specific date and time within that period.' };
     }
 
-    const requestedService = analysis.entities?.service || state.service;
-    const serviceId = state.service_id || await this.findServiceId(user.id, requestedService);
-    if (!serviceId) return this.showAvailableServices(user, phoneNumber, state);
-
     const staffName = analysis.entities?.staff || state.staff;
     const staffId = state.staff_id || (staffName ? await this.findStaffId(user.id, staffName) : null);
     const slots = await this.booking.findSalonAvailabilityInRange(
-      user.id, range.from, range.to, serviceId, staffId, 5,
+      user.id, range.from, range.to, staffId, 5,
     );
     await this.saveConversationState(user.id, phoneNumber, {
       ...state,
       intent: 'BOOKING',
       status: 'WAITING_FOR_SLOT',
-      service: requestedService,
-      service_id: serviceId,
+      service: null,
+      service_id: null,
       staff: staffName || null,
       staff_id: staffId,
       date_range: range,
       alternative_slots: slots.map((slot) => ({ date: slot.date, time: slot.startTime })),
     });
     if (!slots.length) {
-      return { intent: 'BOOKING', response: `I could not find an available ${requestedService} appointment between ${range.from} and ${range.to}. Would you like another period?` };
+      return { intent: 'BOOKING', response: `I could not find an available appointment between ${range.from} and ${range.to}. Would you like another period?` };
     }
     return {
       intent: 'BOOKING',
-      response: `Here are available ${requestedService} appointments from ${range.from} to ${range.to}:\n\n${slots.map((slot) => `${slot.date} at ${slot.startTime}`).join('\n')}\n\nPlease choose one.`,
+      response: `Here are available appointments from ${range.from} to ${range.to}:\n\n${slots.map((slot) => `${slot.date} at ${slot.startTime}`).join('\n')}\n\nPlease choose one.`,
       interactive: {
-        type: 'list', body: `Available ${requestedService} appointments:`, button: 'Choose a time',
+        type: 'list', body: 'Available appointments:', button: 'Choose a time',
         items: slots.map((slot) => ({
           id: `slot:${slot.date}:${slot.startTime}`,
           item: `${slot.date} at ${slot.startTime}`,
@@ -1344,6 +1431,22 @@ class IntentHandler {
     message,
     state,
   ) {
+    // Handles legacy interactive slot payloads after the MVP switched away
+    // from service selection.
+    return this.handleSalonAvailabilityMvp(
+      user,
+      phoneNumber,
+      message,
+      { entities: {} },
+      {
+        customerName: state.name || null,
+        customerPhone: phoneNumber,
+        bookingDate: state.date,
+        bookingTime: state.time,
+        specialRequest: state.special_request || null,
+      },
+    );
+
     if (!state.service_id || !state.date || !state.time) {
       return {
         intent: 'BOOKING',

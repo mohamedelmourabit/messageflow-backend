@@ -17,7 +17,7 @@ Understand English, French, Arabic, Gulf Arabic, Moroccan Darija, and mixed lang
 Configured services: ${JSON.stringify(services)}
 Configured staff: ${JSON.stringify(staff)}
 Conversation state: ${JSON.stringify(context.conversationState || {})}
-Set booking_follow_up to true only when the message semantically continues an active booking. If the conversation state is an active booking (especially WAITING_FOR_SLOT), a request for available times, another slot, or another date is BOOKING, not FAQ. Preserve the existing booking fields and extract only changed fields.`;
+Set booking_follow_up to true only when the message semantically continues an active booking. If the conversation state is an active booking (especially WAITING_FOR_SLOT), a request for available times, another slot, another date, or a short ambiguous reply to the last booking message is BOOKING, not FAQ. Preserve the existing booking fields and extract only changed fields.`;
     try {
       const response = await this.client.messages.create({
         model: this.model,

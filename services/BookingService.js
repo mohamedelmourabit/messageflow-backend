@@ -605,6 +605,31 @@ class BookingService {
     }
   }
 
+  // Salon MVP: appointments are not tied to a service. The business-configured
+  // default duration and real slot/staff availability remain authoritative.
+  async findSalonSlotAvailability(userId, bookingDate, startTime, requestedStaffId = null) {
+    const settings = await this.getBusinessSettings(userId);
+    const endTime = this.calculateEndTime(
+      startTime,
+      Number(settings.default_booking_duration_minutes || 60),
+    );
+    const availability = await this.checkSalonAvailability(
+      userId,
+      bookingDate,
+      startTime,
+      endTime,
+      null,
+      requestedStaffId,
+    );
+    return {
+      available: availability.available,
+      staff: availability.staff,
+      startTime,
+      endTime,
+      reason: availability.reason || null,
+    };
+  }
+
   // =========================================================
   // SALON - ALTERNATIVE TIME SLOTS
   // =========================================================
@@ -618,21 +643,10 @@ class BookingService {
     limit = 5,
   ) {
     try {
-      if (!bookingDate || !requestedTime || !serviceId) return [];
+      if (!bookingDate || !requestedTime) return [];
 
-      const serviceResult = await this.db.query(
-        `SELECT * FROM services
-         WHERE id = $1
-           AND user_id = $2
-           AND COALESCE(active, true) = true
-         LIMIT 1`,
-        [serviceId, userId],
-      );
-
-      const service = serviceResult.rows[0];
-      if (!service) return [];
-
-      const duration = Number(service.duration_minutes || 60);
+      const settings = await this.getBusinessSettings(userId);
+      const duration = Number(settings.default_booking_duration_minutes || 60);
 
       // Respect configured opening hours when they exist.
       const hoursResult = await this.db.query(
@@ -645,23 +659,15 @@ class BookingService {
       );
 
       const opening = hoursResult.rows[0];
-      const openingMinutes = opening?.is_open === false
-        ? null
-        : opening?.open_time
-          ? this.timeToMinutes(opening.open_time)
-          : 0;
-      const closingMinutes = opening?.is_open === false
-        ? null
-        : opening?.close_time
-          ? this.timeToMinutes(opening.close_time)
-          : 24 * 60;
-
-      if (opening?.is_open === false) return [];
+      if (!opening || opening.is_open !== true || !opening.open_time || !opening.close_time) {
+        return [];
+      }
+      const openingMinutes = this.timeToMinutes(opening.open_time);
+      const closingMinutes = this.timeToMinutes(opening.close_time);
 
       const requestedMinutes = this.timeToMinutes(requestedTime);
       if (requestedMinutes === null) return [];
 
-      const settings = await this.getBusinessSettings(userId);
       const noticeMinutes = Number(settings.min_booking_notice_minutes || 0);
       const advanceDays = Number(settings.max_booking_advance_days || 30);
 
@@ -714,7 +720,7 @@ class BookingService {
               startTime,
               endTime,
               staff: availability.staff,
-              service,
+              service: null,
             });
           }
 
@@ -732,16 +738,10 @@ class BookingService {
   // Finds real appointment slots over an inclusive date range. It deliberately
   // returns dates with times instead of selecting an arbitrary day from a
   // customer phrase such as “next week”.
-  async findSalonAvailabilityInRange(userId, fromDate, toDate, serviceId, requestedStaffId = null, limit = 5) {
-    if (!fromDate || !toDate || !serviceId || fromDate > toDate) return [];
-    const serviceResult = await this.db.query(
-      `SELECT * FROM services WHERE id = $1 AND user_id = $2 AND COALESCE(active, true) = true LIMIT 1`,
-      [serviceId, userId],
-    );
-    const service = serviceResult.rows[0];
-    if (!service) return [];
+  async findSalonAvailabilityInRange(userId, fromDate, toDate, requestedStaffId = null, limit = 5) {
+    if (!fromDate || !toDate || fromDate > toDate) return [];
     const settings = await this.getBusinessSettings(userId);
-    const duration = Number(service.duration_minutes || 60);
+    const duration = Number(settings.default_booking_duration_minutes || 60);
     const results = [];
     const cursor = new Date(`${fromDate}T12:00:00Z`);
     const last = new Date(`${toDate}T12:00:00Z`);
@@ -776,8 +776,8 @@ class BookingService {
             if (!notice.rows[0]?.valid) continue;
           }
           const endTime = this.calculateEndTime(startTime, duration);
-          const availability = await this.checkSalonAvailability(userId, date, startTime, endTime, service.id, requestedStaffId);
-          if (availability.available) results.push({ date, startTime, endTime, service, staff: availability.staff });
+          const availability = await this.checkSalonAvailability(userId, date, startTime, endTime, null, requestedStaffId);
+          if (availability.available) results.push({ date, startTime, endTime, staff: availability.staff });
         }
       }
       cursor.setUTCDate(cursor.getUTCDate() + 1);
