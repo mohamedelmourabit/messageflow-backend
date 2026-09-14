@@ -1242,6 +1242,59 @@ class BookingService {
   }
 
   // =========================================================
+  // RESCHEDULE BOOKING (manual staff edit)
+  // =========================================================
+
+  async rescheduleBooking(userId, bookingId, bookingDate, bookingTime) {
+    try {
+      const existing = await this.db.query(
+        `SELECT start_time, end_time FROM bookings WHERE id = $1 AND user_id = $2`,
+        [bookingId, userId],
+      );
+
+      if (!existing.rows[0]) {
+        return null;
+      }
+
+      // Preserve the booking's original duration - this is a manual staff
+      // correction, not a new customer request re-checked against
+      // availability rules.
+      const durationMinutes =
+        this.timeToMinutes(existing.rows[0].end_time) -
+        this.timeToMinutes(existing.rows[0].start_time);
+
+      const endTime = this.calculateEndTime(
+        bookingTime,
+        durationMinutes > 0 ? durationMinutes : 60,
+      );
+
+      // booking_time is a legacy duplicate of start_time that createBooking
+      // still writes for backward compatibility - keep both in sync so a
+      // manual edit doesn't desync display (booking_time) from the column
+      // every availability check actually reads (start_time).
+      const result = await this.db.query(
+        `
+        UPDATE bookings
+        SET booking_date = $1,
+            booking_time = $2,
+            start_time = $2,
+            end_time = $3
+        WHERE id = $4
+          AND user_id = $5
+        RETURNING *
+        `,
+        [bookingDate, bookingTime, endTime, bookingId, userId],
+      );
+
+      return result.rows[0] || null;
+    } catch (err) {
+      console.error('Reschedule booking error:', err.message);
+
+      return null;
+    }
+  }
+
+  // =========================================================
   // UPCOMING BOOKINGS
   // =========================================================
 

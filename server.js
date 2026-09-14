@@ -717,7 +717,7 @@ app.get('/api/dashboard', authMiddleware, async (req, res) => {
       req.userId,
     ]);
     const bookings = await pool.query(
-      'SELECT * FROM bookings WHERE user_id = $1 ORDER BY created_at DESC',
+      'SELECT * FROM bookings WHERE user_id = $1 ORDER BY booking_date ASC, start_time ASC, id ASC',
       [req.userId],
     );
     const messages = await pool.query(
@@ -1102,6 +1102,45 @@ app.post('/api/bookings', authMiddleware, async (req, res) => {
       bookingDate,
       bookingTime,
     );
+    res.json(booking);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/bookings/:id', authMiddleware, async (req, res) => {
+  const { bookingDate, bookingTime } = req.body;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(bookingDate || '') || !/^\d{2}:\d{2}$/.test(bookingTime || '')) {
+    return res.status(400).json({ error: 'bookingDate (YYYY-MM-DD) and bookingTime (HH:MM) are required' });
+  }
+
+  try {
+    const booking = await bookingService.rescheduleBooking(
+      req.userId,
+      req.params.id,
+      bookingDate,
+      bookingTime,
+    );
+
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
+    res.json(booking);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/bookings/:id/cancel', authMiddleware, async (req, res) => {
+  try {
+    const booking = await bookingService.cancelBooking(req.userId, req.params.id);
+
+    if (!booking) {
+      return res.status(404).json({ error: 'Booking not found' });
+    }
+
     res.json(booking);
   } catch (err) {
     res.status(500).json({ error: err.message });
