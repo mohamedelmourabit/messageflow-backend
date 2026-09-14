@@ -843,6 +843,7 @@ class IntentHandler {
     if (!availability.available) {
       return this.handleUnavailableSalonSlot(user, phoneNumber, message, analysis, {
         bookingDate, bookingTime, serviceId: null, staffId, requestedService: null,
+        reason: availability.reason,
       });
     }
 
@@ -1666,17 +1667,14 @@ class IntentHandler {
   // =========================================================
 
   async handleUnavailableSalonSlot(user, phoneNumber, message, analysis, data) {
-    const { bookingDate, bookingTime, serviceId, staffId, requestedService } =
-      data;
-
-    const alternatives = await this.booking.findAlternativeSalonSlots(
-      user.id,
+    const {
       bookingDate,
       bookingTime,
       serviceId,
       staffId,
-      5,
-    );
+      requestedService,
+      reason,
+    } = data;
 
     const state = await this.getConversationState(user.id, phoneNumber);
 
@@ -1698,7 +1696,34 @@ class IntentHandler {
       time: bookingTime,
     });
 
+    // A closed day (weekly day off or holiday) has no alternative time on
+    // that same date - say so plainly instead of a vague "not available"
+    // that leaves the customer guessing why.
+    if (reason === 'CLOSED') {
+      return {
+        intent: 'BOOKING',
+        response: `We're closed on ${this.formatWeekday(bookingDate)}, ${bookingDate}. Please choose another date.`,
+      };
+    }
+
+    const alternatives = await this.booking.findAlternativeSalonSlots(
+      user.id,
+      bookingDate,
+      bookingTime,
+      serviceId,
+      staffId,
+      5,
+    );
+
     if (!alternatives.length) {
+      if (reason === 'OUTSIDE_OPENING_HOURS') {
+        const hours = await this.booking.getOpeningHoursForDate(user.id, bookingDate);
+        return {
+          intent: 'BOOKING',
+          response: `That time is outside our opening hours on ${this.formatWeekday(bookingDate)} (${this.formatTime(hours?.open_time)} - ${this.formatTime(hours?.close_time)}). Please choose a time within those hours or another date.`,
+        };
+      }
+
       return {
         intent: 'BOOKING',
         // This is a real availability result, so wording is deterministic.
@@ -1936,6 +1961,23 @@ class IntentHandler {
       time: bookingTime,
       special_request: specialRequest,
     });
+
+    // A closed day (weekly day off or holiday) has no alternative time on
+    // that same date - say so plainly instead of a vague decline.
+    if (reason === 'CLOSED') {
+      return {
+        intent: 'BOOKING',
+        response: `We're closed on ${this.formatWeekday(bookingDate)}, ${bookingDate}. Please choose another date.`,
+      };
+    }
+
+    if (reason === 'OUTSIDE_OPENING_HOURS') {
+      const hours = await this.booking.getOpeningHoursForDate(user.id, bookingDate);
+      return {
+        intent: 'BOOKING',
+        response: `That time is outside our opening hours on ${this.formatWeekday(bookingDate)} (${this.formatTime(hours?.open_time)} - ${this.formatTime(hours?.close_time)}). Please choose a time within those hours or another date.`,
+      };
+    }
 
     // A date-level constraint (too far ahead, too soon before the notice
     // window) applies to the whole day, not just this time. No alternative
@@ -2457,6 +2499,30 @@ class IntentHandler {
     const number = Number(value);
 
     return Number.isFinite(number) ? number : null;
+  }
+
+  // =========================================================
+  // DATE / TIME FORMATTING
+  // =========================================================
+
+  // bookingDate is always a plain YYYY-MM-DD calendar date already resolved
+  // by the caller - parse it at UTC noon so no local timezone can shift it
+  // to the adjacent day before naming the weekday.
+  formatWeekday(dateStr) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr || '')) return '';
+    return new Date(`${dateStr}T12:00:00Z`).toLocaleDateString('en-US', {
+      weekday: 'long',
+      timeZone: 'UTC',
+    });
+  }
+
+  formatTime(timeStr) {
+    if (!timeStr) return '?';
+    const [hour, minute] = String(timeStr).slice(0, 5).split(':').map(Number);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return '?';
+    const period = hour >= 12 ? 'PM' : 'AM';
+    const displayHour = hour % 12 === 0 ? 12 : hour % 12;
+    return `${displayHour}:${String(minute).padStart(2, '0')} ${period}`;
   }
 
   // =========================================================
