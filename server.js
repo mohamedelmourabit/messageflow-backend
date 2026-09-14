@@ -228,6 +228,28 @@ const initDb = async () => {
     `);
 
     // ==========================================
+    // HOLIDAYS / CLOSED DATES
+    // ==========================================
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS holidays (
+        id SERIAL PRIMARY KEY,
+
+        user_id INTEGER NOT NULL
+          REFERENCES users(id)
+          ON DELETE CASCADE,
+
+        holiday_date DATE NOT NULL,
+
+        reason VARCHAR(200),
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+        CONSTRAINT holidays_user_date_unique
+          UNIQUE (user_id, holiday_date)
+      );
+    `);
+
+    // ==========================================
     // TABLE TYPES - RESTAURANTS
     // ==========================================
     await pool.query(`
@@ -741,6 +763,83 @@ app.put('/api/business-settings', authMiddleware, async (req, res) => {
       [req.userId, restaurantCapacity === null || restaurantCapacity === undefined ? null : Number(restaurantCapacity)],
     );
     res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// OPENING HOURS
+// ============================================
+app.get('/api/opening-hours', authMiddleware, async (req, res) => {
+  try {
+    const hours = await bookingService.getOpeningHours(req.userId);
+    res.json(hours);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/opening-hours', authMiddleware, async (req, res) => {
+  const { hours } = req.body;
+
+  if (!Array.isArray(hours)) {
+    return res.status(400).json({ error: 'hours must be an array of 7 days' });
+  }
+
+  const valid = hours.every((h) => {
+    if (!Number.isInteger(h?.day_of_week) || h.day_of_week < 0 || h.day_of_week > 6) return false;
+    if (h.is_open !== true && h.is_open !== false) return false;
+    if (h.is_open && (!/^\d{2}:\d{2}$/.test(h.open_time || '') || !/^\d{2}:\d{2}$/.test(h.close_time || ''))) return false;
+    return true;
+  });
+
+  if (!valid) {
+    return res.status(400).json({ error: 'Each day needs day_of_week (0-6), is_open, and open_time/close_time (HH:MM) when open' });
+  }
+
+  try {
+    const result = await bookingService.setOpeningHours(req.userId, hours);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// HOLIDAYS
+// ============================================
+app.get('/api/holidays', authMiddleware, async (req, res) => {
+  try {
+    const holidays = await bookingService.getHolidays(req.userId);
+    res.json(holidays);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/holidays', authMiddleware, async (req, res) => {
+  const { date, reason } = req.body;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) {
+    return res.status(400).json({ error: 'date must be in YYYY-MM-DD format' });
+  }
+
+  try {
+    const holiday = await bookingService.addHoliday(req.userId, date, reason || null);
+    res.json(holiday);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/holidays/:id', authMiddleware, async (req, res) => {
+  try {
+    const deleted = await bookingService.deleteHoliday(req.userId, req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Holiday not found' });
+    }
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

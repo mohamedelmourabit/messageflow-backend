@@ -31,6 +31,137 @@ class BookingService {
   }
 
   // =========================================================
+  // OPENING HOURS
+  // =========================================================
+
+  async getOpeningHours(userId) {
+    const result = await this.db.query(
+      `SELECT day_of_week, is_open, open_time, close_time
+       FROM opening_hours
+       WHERE user_id = $1
+       ORDER BY day_of_week ASC`,
+      [userId],
+    );
+
+    // Always return one row per day (0=Sunday..6=Saturday) so the caller
+    // (frontend, or an availability check) never has to guess what an
+    // absent day means - a day the business never configured is closed.
+    const byDay = new Map(result.rows.map((row) => [row.day_of_week, row]));
+
+    return Array.from({ length: 7 }, (_, day) => byDay.get(day) || {
+      day_of_week: day,
+      is_open: false,
+      open_time: null,
+      close_time: null,
+    });
+  }
+
+  async setOpeningHours(userId, hours) {
+    const days = (hours || []).filter(
+      (h) => Number.isInteger(h?.day_of_week) && h.day_of_week >= 0 && h.day_of_week <= 6,
+    );
+
+    for (const day of days) {
+      await this.db.query(
+        `INSERT INTO opening_hours (user_id, day_of_week, is_open, open_time, close_time)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, day_of_week)
+         DO UPDATE SET is_open = EXCLUDED.is_open,
+                       open_time = EXCLUDED.open_time,
+                       close_time = EXCLUDED.close_time`,
+        [
+          userId,
+          day.day_of_week,
+          day.is_open === true,
+          day.is_open === true ? day.open_time || null : null,
+          day.is_open === true ? day.close_time || null : null,
+        ],
+      );
+    }
+
+    return this.getOpeningHours(userId);
+  }
+
+  async getOpeningHoursForDate(userId, date) {
+    const result = await this.db.query(
+      `SELECT is_open, open_time, close_time
+       FROM opening_hours
+       WHERE user_id = $1
+         AND day_of_week = EXTRACT(DOW FROM $2::date)::int
+       LIMIT 1`,
+      [userId, date],
+    );
+
+    return result.rows[0] || null;
+  }
+
+  // =========================================================
+  // HOLIDAYS / CLOSED DATES
+  // =========================================================
+
+  async getHolidays(userId) {
+    // holiday_date is formatted server-side to a plain YYYY-MM-DD string -
+    // the pg driver otherwise hands back a DATE column as a JS Date built
+    // in the Node process's local timezone, which can serialize a day off
+    // from what was actually stored once it round-trips through JSON.
+    const result = await this.db.query(
+      `SELECT id, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date, reason
+       FROM holidays
+       WHERE user_id = $1
+       ORDER BY holiday_date ASC`,
+      [userId],
+    );
+
+    return result.rows;
+  }
+
+  async addHoliday(userId, date, reason = null) {
+    const result = await this.db.query(
+      `INSERT INTO holidays (user_id, holiday_date, reason)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, holiday_date)
+       DO UPDATE SET reason = EXCLUDED.reason
+       RETURNING id, TO_CHAR(holiday_date, 'YYYY-MM-DD') AS holiday_date, reason`,
+      [userId, date, reason],
+    );
+
+    return result.rows[0];
+  }
+
+  async deleteHoliday(userId, holidayId) {
+    const result = await this.db.query(
+      `DELETE FROM holidays WHERE id = $1 AND user_id = $2`,
+      [holidayId, userId],
+    );
+
+    return result.rowCount > 0;
+  }
+
+  async isHoliday(userId, date) {
+    const result = await this.db.query(
+      `SELECT 1 FROM holidays WHERE user_id = $1 AND holiday_date = $2 LIMIT 1`,
+      [userId, date],
+    );
+
+    return result.rows.length > 0;
+  }
+
+  // Single source of truth for "is this business open at all on this date":
+  // a configured weekly closed day, a day never configured, or a holiday
+  // all mean the same thing - never invent business hours either way.
+  async isBusinessOpenOnDate(userId, date) {
+    const [hours, holiday] = await Promise.all([
+      this.getOpeningHoursForDate(userId, date),
+      this.isHoliday(userId, date),
+    ]);
+
+    if (holiday) return false;
+    if (!hours || hours.is_open !== true || !hours.open_time || !hours.close_time) return false;
+
+    return true;
+  }
+
+  // =========================================================
   // TABLE TYPES - RESTAURANT
   // =========================================================
 
@@ -331,6 +462,35 @@ class BookingService {
         }
       }
 
+      // -----------------------------------------------------
+      // Business open on this date/time
+      // -----------------------------------------------------
+
+      if (!(await this.isBusinessOpenOnDate(userId, bookingDate))) {
+        return {
+          available: false,
+          reason: 'CLOSED',
+        };
+      }
+
+      const hours = await this.getOpeningHoursForDate(userId, bookingDate);
+      const openMinutes = this.timeToMinutes(hours.open_time);
+      const closeMinutes = this.timeToMinutes(hours.close_time);
+      const requestStart = this.timeToMinutes(startTime);
+      const requestEnd = this.timeToMinutes(endTime);
+
+      if (
+        requestStart === null ||
+        requestEnd === null ||
+        requestStart < openMinutes ||
+        requestEnd > closeMinutes
+      ) {
+        return {
+          available: false,
+          reason: 'OUTSIDE_OPENING_HOURS',
+        };
+      }
+
       // Restaurants can start with a single, explicit guest capacity instead
       // of configuring table types. This is the authoritative capacity check.
       const capacity = Number(settings.restaurant_capacity || 0);
@@ -405,20 +565,12 @@ class BookingService {
       const settings = await this.getBusinessSettings(userId);
       const duration = Number(settings.default_booking_duration_minutes || 90);
 
-      // Respect configured opening hours when they exist.
-      const hoursResult = await this.db.query(
-        `SELECT open_time, close_time, is_open
-         FROM opening_hours
-         WHERE user_id = $1
-           AND day_of_week = EXTRACT(DOW FROM $2::date)::int
-         LIMIT 1`,
-        [userId, bookingDate],
-      );
-
-      const opening = hoursResult.rows[0];
-      if (!opening || opening.is_open !== true || !opening.open_time || !opening.close_time) {
+      // Respect configured opening hours and holidays - never propose a
+      // time on a day the business is closed.
+      if (!(await this.isBusinessOpenOnDate(userId, bookingDate))) {
         return [];
       }
+      const opening = await this.getOpeningHoursForDate(userId, bookingDate);
       const openingMinutes = this.timeToMinutes(opening.open_time);
       const closingMinutes = this.timeToMinutes(opening.close_time);
 
@@ -526,6 +678,35 @@ class BookingService {
     requestedStaffId = null,
   ) {
     try {
+      if (!(await this.isBusinessOpenOnDate(userId, bookingDate))) {
+        return {
+          available: false,
+          staff: null,
+          serviceId,
+          reason: 'CLOSED',
+        };
+      }
+
+      const hours = await this.getOpeningHoursForDate(userId, bookingDate);
+      const openMinutes = this.timeToMinutes(hours.open_time);
+      const closeMinutes = this.timeToMinutes(hours.close_time);
+      const requestStart = this.timeToMinutes(startTime);
+      const requestEnd = this.timeToMinutes(endTime);
+
+      if (
+        requestStart === null ||
+        requestEnd === null ||
+        requestStart < openMinutes ||
+        requestEnd > closeMinutes
+      ) {
+        return {
+          available: false,
+          staff: null,
+          serviceId,
+          reason: 'OUTSIDE_OPENING_HOURS',
+        };
+      }
+
       let staff = [];
 
       // -----------------------------------------------------
@@ -752,20 +933,12 @@ class BookingService {
       const settings = await this.getBusinessSettings(userId);
       const duration = Number(settings.default_booking_duration_minutes || 60);
 
-      // Respect configured opening hours when they exist.
-      const hoursResult = await this.db.query(
-        `SELECT open_time, close_time, is_open
-         FROM opening_hours
-         WHERE user_id = $1
-           AND day_of_week = EXTRACT(DOW FROM $2::date)::int
-         LIMIT 1`,
-        [userId, bookingDate],
-      );
-
-      const opening = hoursResult.rows[0];
-      if (!opening || opening.is_open !== true || !opening.open_time || !opening.close_time) {
+      // Respect configured opening hours and holidays - never propose a
+      // time on a day the business is closed.
+      if (!(await this.isBusinessOpenOnDate(userId, bookingDate))) {
         return [];
       }
+      const opening = await this.getOpeningHoursForDate(userId, bookingDate);
       const openingMinutes = this.timeToMinutes(opening.open_time);
       const closingMinutes = this.timeToMinutes(opening.close_time);
 
@@ -859,15 +1032,11 @@ class BookingService {
         cursor.setUTCDate(cursor.getUTCDate() + 1);
         continue;
       }
-      const hoursResult = await this.db.query(
-        `SELECT open_time, close_time, is_open FROM opening_hours
-         WHERE user_id = $1 AND day_of_week = EXTRACT(DOW FROM $2::date)::int LIMIT 1`,
-        [userId, date],
-      );
-      const opening = hoursResult.rows[0];
-      // A range search must never manufacture business hours. Businesses need
-      // an opening-hours record before we can offer an exact time.
-      if (opening?.is_open === true && opening.open_time && opening.close_time) {
+      // A range search must never manufacture business hours, and must skip
+      // holidays entirely - businesses need an opening-hours record and no
+      // holiday on this date before we can offer an exact time.
+      if (await this.isBusinessOpenOnDate(userId, date)) {
+        const opening = await this.getOpeningHoursForDate(userId, date);
         const open = this.timeToMinutes(opening.open_time);
         const close = this.timeToMinutes(opening.close_time);
         for (let minutes = open; minutes + duration <= close && results.length < limit; minutes += 30) {
